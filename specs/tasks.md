@@ -9,17 +9,17 @@ Orden pensado para que cada fase deje algo verde y commiteable. `[x]` = hecho en
 - [x] Logging estructurado (structlog) compartido por api y worker
 
 ## Fase 2 — Persistencia
-- [ ] Alembic con `env.py` async; migración `0001_initial` (enums, tablas, índices parciales)
-- [ ] Test de migraciones: `upgrade head` → `downgrade base` → `upgrade head`
-- [ ] `session.py` (engine + `async_sessionmaker`, `expire_on_commit=False`)
-- [ ] `UnitOfWork` + repositorios (Alert, Forecast, Notification)
-- [ ] `locks.py` (advisory lock por job)
-- [ ] `scripts/seed_forecasts.py` — mock del ingestor con upsert (incluye casos borde: 59.99 / 60.00, fechas pasadas, stale)
+- [x] Alembic con `env.py` async; migración `0001_initial` (enums, tablas, índices parciales)
+- [x] Test de migraciones: `upgrade head` → `downgrade base` → `upgrade head`
+- [x] `session.py` (engine + `async_sessionmaker`, `expire_on_commit=False`)
+- [x] `UnitOfWork` + repositorios (Alert, Forecast, Notification)
+- [x] `locks.py` (advisory lock por job)
+- [x] `scripts/seed_forecasts.py` — mock del ingestor con upsert (incluye casos borde: 59.99 / 60.00, fechas pasadas, stale)
 
 ## Fase 3 — Dominio (TDD primero)
-- [ ] Tests de `evaluate()` cubriendo AC-01…AC-10 y AC-04b…e, incluido `REARM_MARGIN`
-- [ ] Property-based (hypothesis): nunca dispara si prob < umbral; mismo dato dos veces no re-dispara; `episode` monótono
-- [ ] `entities.py` + `evaluator.py` (máquina de estados: Skip / Hold / Rearm / Fire)
+- [x] Tests de `evaluate()` cubriendo AC-01…AC-10 y AC-04b…e, incluido `REARM_MARGIN`
+- [x] Property-based (hypothesis): nunca dispara si prob < umbral; mismo dato dos veces no re-dispara; `episode` monótono
+- [x] `entities.py` + `evaluator.py` (máquina de estados: Skip / Hold / Rearm / Fire)
 
 ## Fase 4 — Casos de uso
 - [ ] `manage_alerts` con fakes en memoria (ownership, duplicado, versión)
