@@ -35,8 +35,8 @@ Orden pensado para que cada fase deje algo verde y commiteable. `[x]` = hecho en
 - [x] Tests API: AC-14, AC-15, AC-16 + test de contrato (openapi generado vs `docs/openapi.yaml`)
 
 ## Fase 6 — Worker
-- [ ] `worker/scheduler.py` + `worker/main.py` con shutdown ordenado
-- [ ] Test: el job registrado tiene `max_instances=1`, `coalesce=True`
+- [x] `worker/scheduler.py` + `worker/main.py` con shutdown ordenado
+- [x] Test: el job registrado tiene `max_instances=1`, `coalesce=True`
 
 ## Fase 7 — Entrega
 - [ ] README: cómo correr (compose / local), cómo testear, decisiones, qué faltó
