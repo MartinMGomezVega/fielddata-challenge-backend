@@ -161,9 +161,7 @@ class WeatherForecast(Base):
     forecast_date: Mapped[date] = mapped_column(Date, nullable=False)
     event_type: Mapped[WeatherEvent] = mapped_column(WEATHER_EVENT_ENUM, nullable=False)
     probability: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
-    source: Mapped[str] = mapped_column(
-        String(50), nullable=False, default="mock", server_default=text("'mock'")
-    )
+    source: Mapped[str] = mapped_column(String(50), nullable=False, server_default=text("'mock'"))
     # Cuándo EMITIÓ el proveedor este pronóstico (corrida del modelo). Es lo que mide
     # la frescura del dato; `ingested_at` sólo dice cuándo lo trajimos nosotros.
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -248,10 +246,10 @@ class AlertBreachState(Base):
     """Estado de cada (alerta, fecha pronosticada): ¿está ahora por encima del umbral?
 
     Transiciones (las decide la función pura del dominio, no esta tabla):
-        armada  --(prob >= umbral)-->  disparada   => episode += 1 y se crea notificación
-        disparada --(prob >= umbral)-->  disparada => nada (sigue arriba, no spameamos)
-        disparada --(prob <  umbral - REARM_MARGIN)-->  armada => se re-arma para próximo cruce
-        pronóstico stale / faltante              => nada (no se considera una "bajada")
+        armada  --(prob >= umbral)-->  disparada   => episode += 1
+        disparada --(prob >= umbral)-->  disparada => nada (sigue arriba)
+        disparada --(prob <  umbral - REARM_MARGIN)-->  armada => se re-arma
+        pronóstico stale / faltante              => nada
 
     Con esto "baja y vuelve a subir" re-avisa siempre, y correr el evaluador N veces con
     el mismo dato no produce transiciones nuevas (idempotente por diseño).
@@ -301,14 +299,9 @@ class AlertNotification(TimestampMixin, Base):
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     status: Mapped[NotificationStatus] = mapped_column(
-        NOTIFICATION_STATUS_ENUM,
-        nullable=False,
-        default=NotificationStatus.PENDING,
-        server_default=text("'pending'"),
+        NOTIFICATION_STATUS_ENUM, nullable=False, server_default=text("'pending'")
     )
-    attempts: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, default=0, server_default=text("0")
-    )
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
     next_attempt_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
