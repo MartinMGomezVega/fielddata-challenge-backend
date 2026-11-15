@@ -1,12 +1,21 @@
 """Tests de integración para los endpoints de alertas y criterios AC-14, AC-15, AC-16."""
 
+from __future__ import annotations
+
 import os
 import uuid
+from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import httpx
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from agrobot.api.deps import get_current_user_id, get_uow
 from agrobot.api.main import create_app
@@ -27,42 +36,44 @@ TEST_DB_URL = os.environ.get(
 
 
 @pytest.fixture
-async def async_engine():
+async def async_engine() -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(TEST_DB_URL, echo=False)
     yield engine
     await engine.dispose()
 
 
 @pytest.fixture
-def session_factory(async_engine):
+def session_factory(async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(bind=async_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @pytest.fixture
-async def clean_db(session_factory):
+async def clean_db(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
     async with session_factory() as session:
-        await session.execute(IdempotencyKey.__table__.delete())
-        await session.execute(AlertNotification.__table__.delete())
-        await session.execute(AlertBreachState.__table__.delete())
-        await session.execute(Alert.__table__.delete())
-        await session.execute(WeatherForecast.__table__.delete())
-        await session.execute(Field.__table__.delete())
-        await session.execute(User.__table__.delete())
+        await session.execute(delete(IdempotencyKey))
+        await session.execute(delete(AlertNotification))
+        await session.execute(delete(AlertBreachState))
+        await session.execute(delete(Alert))
+        await session.execute(delete(WeatherForecast))
+        await session.execute(delete(Field))
+        await session.execute(delete(User))
         await session.commit()
     yield
     async with session_factory() as session:
-        await session.execute(IdempotencyKey.__table__.delete())
-        await session.execute(AlertNotification.__table__.delete())
-        await session.execute(AlertBreachState.__table__.delete())
-        await session.execute(Alert.__table__.delete())
-        await session.execute(WeatherForecast.__table__.delete())
-        await session.execute(Field.__table__.delete())
-        await session.execute(User.__table__.delete())
+        await session.execute(delete(IdempotencyKey))
+        await session.execute(delete(AlertNotification))
+        await session.execute(delete(AlertBreachState))
+        await session.execute(delete(Alert))
+        await session.execute(delete(WeatherForecast))
+        await session.execute(delete(Field))
+        await session.execute(delete(User))
         await session.commit()
 
 
 @pytest.fixture
-async def setup_data(session_factory, clean_db):
+async def setup_data(
+    session_factory: async_sessionmaker[AsyncSession], clean_db: None
+) -> dict[str, uuid.UUID]:
     _ = clean_db
     user_id = uuid.uuid4()
     other_user_id = uuid.uuid4()
@@ -101,7 +112,9 @@ async def setup_data(session_factory, clean_db):
 
 
 @pytest.fixture
-async def client(session_factory, setup_data):
+async def client(
+    session_factory: async_sessionmaker[AsyncSession], setup_data: dict[str, uuid.UUID]
+) -> AsyncIterator[httpx.AsyncClient]:
     app = create_app()
     app.dependency_overrides[get_uow] = lambda: SqlAlchemyUnitOfWork(session_factory)
     app.dependency_overrides[get_current_user_id] = lambda: setup_data["user_id"]
@@ -111,7 +124,9 @@ async def client(session_factory, setup_data):
         yield ac
 
 
-async def test_ac_14_post_validations(client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]):
+async def test_ac_14_post_validations(
+    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+) -> None:
     """AC-14: POST con campo ajeno -> 404. Alerta duplicada -> 409. Umbral 0 o 101 -> 422."""
     headers = {"X-User-Id": str(setup_data["user_id"])}
 
@@ -181,7 +196,9 @@ async def test_ac_14_post_validations(client: httpx.AsyncClient, setup_data: dic
     assert r_dup.headers["content-type"] == "application/problem+json"
 
 
-async def test_idempotency_key_post(client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]):
+async def test_idempotency_key_post(
+    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+) -> None:
     """Garantía de Idempotency-Key en POST /alerts."""
     headers = {
         "X-User-Id": str(setup_data["user_id"]),
@@ -216,7 +233,7 @@ async def test_idempotency_key_post(client: httpx.AsyncClient, setup_data: dict[
 
 async def test_ac_15_patch_etag_optimistic_locking(
     client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
-):
+) -> None:
     """AC-15: PATCH con If-Match desactualizado -> 412.
     Con ETag correcto -> 200 y versión incrementada.
     """
@@ -257,7 +274,9 @@ async def test_ac_15_patch_etag_optimistic_locking(
     assert r_ok.json()["threshold"] == "75.00" or r_ok.json()["threshold"] == 75.0
 
 
-async def test_ac_16_delete_idempotent(client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]):
+async def test_ac_16_delete_idempotent(
+    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+) -> None:
     """AC-16: DELETE dos veces -> 204 ambas.
     La alerta deja de evaluarse y su historial sigue consultable.
     """
@@ -292,7 +311,7 @@ async def test_ac_16_delete_idempotent(client: httpx.AsyncClient, setup_data: di
     assert r_notifs.status_code in (200, 404)
 
 
-async def test_health_endpoints(client: httpx.AsyncClient):
+async def test_health_endpoints(client: httpx.AsyncClient) -> None:
     """Verificación de endpoints /health/live y /health/ready."""
     r_live = await client.get("/health/live")
     assert r_live.status_code == 200

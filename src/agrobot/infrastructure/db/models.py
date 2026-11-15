@@ -19,6 +19,7 @@ Decisiones clave (detalle en Specs/plan.md §2):
 
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -60,12 +61,16 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-def _pg_enum(enum_cls: type, name: str) -> Enum:
+def _get_enum_values(enum_type: type[enum.Enum]) -> list[object]:
+    return [m.value for m in enum_type]
+
+
+def _pg_enum(enum_cls: type[enum.Enum], name: str) -> Enum:
     # values_callable -> se persiste el value ("rain"), no el nombre ("RAIN").
     return Enum(
         enum_cls,
         name=name,
-        values_callable=lambda e: [m.value for m in e],
+        values_callable=_get_enum_values,
         validate_strings=True,
     )
 

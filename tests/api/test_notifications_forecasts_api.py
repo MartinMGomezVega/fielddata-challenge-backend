@@ -1,13 +1,22 @@
 """Tests para endpoints de notificaciones y pronósticos."""
 
+from __future__ import annotations
+
 import os
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from agrobot.api.deps import get_current_user_id, get_uow
 from agrobot.api.main import create_app
@@ -29,32 +38,44 @@ TEST_DB_URL = os.environ.get(
 
 
 @pytest.fixture
-async def async_engine():
+async def async_engine() -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(TEST_DB_URL, echo=False)
     yield engine
     await engine.dispose()
 
 
 @pytest.fixture
-def session_factory(async_engine):
+def session_factory(async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(bind=async_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @pytest.fixture
-async def clean_db(session_factory):
+async def clean_db(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
     async with session_factory() as session:
-        await session.execute(IdempotencyKey.__table__.delete())
-        await session.execute(AlertNotification.__table__.delete())
-        await session.execute(AlertBreachState.__table__.delete())
-        await session.execute(Alert.__table__.delete())
-        await session.execute(WeatherForecast.__table__.delete())
-        await session.execute(Field.__table__.delete())
-        await session.execute(User.__table__.delete())
+        await session.execute(delete(IdempotencyKey))
+        await session.execute(delete(AlertNotification))
+        await session.execute(delete(AlertBreachState))
+        await session.execute(delete(Alert))
+        await session.execute(delete(WeatherForecast))
+        await session.execute(delete(Field))
+        await session.execute(delete(User))
+        await session.commit()
+    yield
+    async with session_factory() as session:
+        await session.execute(delete(IdempotencyKey))
+        await session.execute(delete(AlertNotification))
+        await session.execute(delete(AlertBreachState))
+        await session.execute(delete(Alert))
+        await session.execute(delete(WeatherForecast))
+        await session.execute(delete(Field))
+        await session.execute(delete(User))
         await session.commit()
 
 
 @pytest.fixture
-async def setup_data(session_factory, clean_db):
+async def setup_data(
+    session_factory: async_sessionmaker[AsyncSession], clean_db: None
+) -> dict[str, uuid.UUID]:
     _ = clean_db
     user_id = uuid.uuid4()
     field_id = uuid.uuid4()
@@ -107,7 +128,9 @@ async def setup_data(session_factory, clean_db):
 
 
 @pytest.fixture
-async def client(session_factory, setup_data):
+async def client(
+    session_factory: async_sessionmaker[AsyncSession], setup_data: dict[str, uuid.UUID]
+) -> AsyncIterator[httpx.AsyncClient]:
     app = create_app()
     app.dependency_overrides[get_uow] = lambda: SqlAlchemyUnitOfWork(session_factory)
     app.dependency_overrides[get_current_user_id] = lambda: setup_data["user_id"]
@@ -119,7 +142,7 @@ async def client(session_factory, setup_data):
 
 async def test_list_notifications_inbox(
     client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
-):
+) -> None:
     headers = {"X-User-Id": str(setup_data["user_id"])}
     r = await client.get("/api/v1/notifications", headers=headers)
     assert r.status_code == 200
@@ -132,7 +155,7 @@ async def test_list_notifications_inbox(
 
 async def test_list_alert_notifications_history(
     client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
-):
+) -> None:
     headers = {"X-User-Id": str(setup_data["user_id"])}
     alert_id = setup_data["alert_id"]
     r = await client.get(f"/api/v1/alerts/{alert_id}/notifications", headers=headers)
@@ -141,7 +164,9 @@ async def test_list_alert_notifications_history(
     assert len(data["items"]) == 1
 
 
-async def test_list_field_forecasts(client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]):
+async def test_list_field_forecasts(
+    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+) -> None:
     headers = {"X-User-Id": str(setup_data["user_id"])}
     field_id = setup_data["field_id"]
     r = await client.get(f"/api/v1/fields/{field_id}/forecasts", headers=headers)

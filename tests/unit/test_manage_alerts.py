@@ -130,8 +130,8 @@ class FakeFieldRepository:
 
 class FakeUnitOfWork(UnitOfWork):
     def __init__(self, alert_repo: FakeAlertRepository, field_repo: FakeFieldRepository) -> None:
-        self.alerts: AlertRepository = alert_repo  # type: ignore[assignment]
-        self.fields: FieldRepository = field_repo  # type: ignore[assignment]
+        self.alerts: AlertRepository = alert_repo
+        self.fields: FieldRepository = field_repo
         self.forecasts: ForecastRepository = None  # type: ignore[assignment]
         self.breach_states: BreachStateRepository = None  # type: ignore[assignment]
         self.notifications: NotificationRepository = None  # type: ignore[assignment]

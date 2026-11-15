@@ -15,12 +15,18 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from agrobot.application.use_cases.dispatch_notifications import DispatchNotifications
 from agrobot.application.use_cases.evaluate_alerts import EvaluateAlerts
@@ -44,40 +50,42 @@ TEST_DB_URL = os.environ.get(
 
 
 @pytest.fixture
-async def async_engine():
+async def async_engine() -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(TEST_DB_URL, echo=False)
     yield engine
     await engine.dispose()
 
 
 @pytest.fixture
-def session_factory(async_engine):
+def session_factory(async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(bind=async_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @pytest.fixture
-async def clean_db(session_factory):
+async def clean_db(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
     async with session_factory() as session:
-        await session.execute(AlertNotification.__table__.delete())
-        await session.execute(AlertBreachState.__table__.delete())
-        await session.execute(Alert.__table__.delete())
-        await session.execute(WeatherForecast.__table__.delete())
-        await session.execute(Field.__table__.delete())
-        await session.execute(User.__table__.delete())
+        await session.execute(delete(AlertNotification))
+        await session.execute(delete(AlertBreachState))
+        await session.execute(delete(Alert))
+        await session.execute(delete(WeatherForecast))
+        await session.execute(delete(Field))
+        await session.execute(delete(User))
         await session.commit()
     yield
     async with session_factory() as session:
-        await session.execute(AlertNotification.__table__.delete())
-        await session.execute(AlertBreachState.__table__.delete())
-        await session.execute(Alert.__table__.delete())
-        await session.execute(WeatherForecast.__table__.delete())
-        await session.execute(Field.__table__.delete())
-        await session.execute(User.__table__.delete())
+        await session.execute(delete(AlertNotification))
+        await session.execute(delete(AlertBreachState))
+        await session.execute(delete(Alert))
+        await session.execute(delete(WeatherForecast))
+        await session.execute(delete(Field))
+        await session.execute(delete(User))
         await session.commit()
 
 
 @pytest.fixture
-async def seeded_entities(session_factory, clean_db):
+async def seeded_entities(
+    session_factory: async_sessionmaker[AsyncSession], clean_db: None
+) -> dict[str, uuid.UUID]:
     _ = clean_db
     user_id = uuid.uuid4()
     field_id = uuid.uuid4()
@@ -108,7 +116,9 @@ async def seeded_entities(session_factory, clean_db):
     return {"user_id": user_id, "field_id": field_id, "alert_id": alert_id}
 
 
-async def test_ac_03_repeated_evaluation_without_changes(session_factory, seeded_entities):
+async def test_ac_03_repeated_evaluation_without_changes(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
     """AC-03: Correr el evaluador 2 veces seguidas sin cambios -> 1 sola notificación."""
     entities = seeded_entities
     now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
@@ -152,7 +162,9 @@ async def test_ac_03_repeated_evaluation_without_changes(session_factory, seeded
         assert notif_count == 1
 
 
-async def test_ac_04_oscillation_90_30_90_end_to_end(session_factory, seeded_entities):
+async def test_ac_04_oscillation_90_30_90_end_to_end(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
     """AC-04: Pronóstico 90 -> 30 -> 90 para la misma fecha.
     Genera 2 notificaciones (episodios 1 y 2).
     """
@@ -163,75 +175,81 @@ async def test_ac_04_oscillation_90_30_90_end_to_end(session_factory, seeded_ent
 
     uow = SqlAlchemyUnitOfWork(session_factory)
 
+    # 1. Pronóstico 90% (cruza el umbral 60%)
+    async with uow as u:
+        await u.forecasts.upsert(
+            WeatherForecast(
+                field_id=entities["field_id"],
+                forecast_date=target_date,
+                event_type=WeatherEvent.FROST,
+                probability=Decimal("90.00"),
+                issued_at=now_utc - timedelta(hours=3),
+            )
+        )
+        await u.commit()
+
     async with session_factory() as session:
         lock = PostgresAdvisoryLock(session)
         evaluator = EvaluateAlerts(uow, clock, lock)
-
-        # 1. Pronóstico 90%
-        async with uow as u:
-            await u.forecasts.upsert(
-                WeatherForecast(
-                    field_id=entities["field_id"],
-                    forecast_date=target_date,
-                    event_type=WeatherEvent.FROST,
-                    probability=Decimal("90.00"),
-                    issued_at=now_utc - timedelta(hours=3),
-                )
-            )
-            await u.commit()
-
         r1 = await evaluator.run()
         assert r1.fired == 1
 
-        # 2. Pronóstico 30% (baja del umbral -> Rearm)
-        async with uow as u:
-            await u.forecasts.upsert(
-                WeatherForecast(
-                    field_id=entities["field_id"],
-                    forecast_date=target_date,
-                    event_type=WeatherEvent.FROST,
-                    probability=Decimal("30.00"),
-                    issued_at=now_utc - timedelta(hours=2),
-                )
+    # 2. Pronóstico baja a 30% (rearma)
+    async with uow as u:
+        await u.forecasts.upsert(
+            WeatherForecast(
+                field_id=entities["field_id"],
+                forecast_date=target_date,
+                event_type=WeatherEvent.FROST,
+                probability=Decimal("30.00"),
+                issued_at=now_utc - timedelta(hours=2),
             )
-            await u.commit()
+        )
+        await u.commit()
 
+    async with session_factory() as session:
+        lock = PostgresAdvisoryLock(session)
+        evaluator = EvaluateAlerts(uow, clock, lock)
         r2 = await evaluator.run()
         assert r2.rearmed == 1
         assert r2.fired == 0
 
-        # 3. Pronóstico 90% (vuelve a subir -> Fire episode 2)
-        async with uow as u:
-            await u.forecasts.upsert(
-                WeatherForecast(
-                    field_id=entities["field_id"],
-                    forecast_date=target_date,
-                    event_type=WeatherEvent.FROST,
-                    probability=Decimal("90.00"),
-                    issued_at=now_utc - timedelta(hours=1),
-                )
+    # 3. Pronóstico vuelve a subir a 90% (nuevo episodio -> re-avisa)
+    async with uow as u:
+        await u.forecasts.upsert(
+            WeatherForecast(
+                field_id=entities["field_id"],
+                forecast_date=target_date,
+                event_type=WeatherEvent.FROST,
+                probability=Decimal("90.00"),
+                issued_at=now_utc - timedelta(hours=1),
             )
-            await u.commit()
+        )
+        await u.commit()
 
+    async with session_factory() as session:
+        lock = PostgresAdvisoryLock(session)
+        evaluator = EvaluateAlerts(uow, clock, lock)
         r3 = await evaluator.run()
         assert r3.fired == 1
 
-        # Verificar en base de datos: 2 notificaciones con episode 1 y 2
-        notifs = list(
-            (
-                await session.scalars(
-                    select(AlertNotification)
-                    .where(AlertNotification.alert_id == entities["alert_id"])
-                    .order_by(AlertNotification.episode.asc())
-                )
-            ).all()
-        )
+    # Verificar que existen 2 notificaciones con episodios 1 y 2
+    async with session_factory() as session:
+        notifs = (
+            await session.scalars(
+                select(AlertNotification)
+                .where(AlertNotification.alert_id == entities["alert_id"])
+                .order_by(AlertNotification.episode.asc())
+            )
+        ).all()
         assert len(notifs) == 2
         assert notifs[0].episode == 1
         assert notifs[1].episode == 2
 
 
-async def test_ac_04d_upsert_with_older_issued_at_is_ignored(session_factory, seeded_entities):
+async def test_ac_04d_upsert_with_older_issued_at_is_ignored(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
     """AC-04d: Un lote con issued_at más viejo que el guardado no altera el pronóstico."""
     entities = seeded_entities
     now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
@@ -277,7 +295,9 @@ async def test_ac_04d_upsert_with_older_issued_at_is_ignored(session_factory, se
         assert stored.issued_at == f1.issued_at
 
 
-async def test_ac_11_concurrent_evaluators_advisory_lock(session_factory, seeded_entities):
+async def test_ac_11_concurrent_evaluators_advisory_lock(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
     """AC-11: Dos workers corren el evaluador a la vez -> mismo resultado que uno solo."""
     entities = seeded_entities
     now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
@@ -318,7 +338,9 @@ async def test_ac_11_concurrent_evaluators_advisory_lock(session_factory, seeded
         assert completed[0].fired == 1
 
 
-async def test_ac_12_sender_transient_failure_and_retry(session_factory, seeded_entities):
+async def test_ac_12_sender_transient_failure_and_retry(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
     """AC-12: Sender falla 1 vez y luego funciona -> notificación sent, attempts = 2."""
     entities = seeded_entities
     now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
@@ -378,7 +400,9 @@ async def test_ac_12_sender_transient_failure_and_retry(session_factory, seeded_
         assert notif_db.sent_at is not None
 
 
-async def test_ac_13_sender_permanent_failure(session_factory, seeded_entities):
+async def test_ac_13_sender_permanent_failure(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
     """AC-13: Sender falla siempre -> failed tras MAX_ATTEMPTS, last_error con causa."""
     entities = seeded_entities
     now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
@@ -411,6 +435,7 @@ async def test_ac_13_sender_permanent_failure(session_factory, seeded_entities):
     await dispatcher.run()
     async with session_factory() as session:
         n = await session.get(AlertNotification, notif_id)
+        assert n is not None
         assert n.status == NotificationStatus.PENDING
         clock.set_time(n.next_attempt_at + timedelta(seconds=1))
 
@@ -418,6 +443,7 @@ async def test_ac_13_sender_permanent_failure(session_factory, seeded_entities):
     await dispatcher.run()
     async with session_factory() as session:
         n = await session.get(AlertNotification, notif_id)
+        assert n is not None
         assert n.status == NotificationStatus.PENDING
         clock.set_time(n.next_attempt_at + timedelta(seconds=1))
 
@@ -427,12 +453,15 @@ async def test_ac_13_sender_permanent_failure(session_factory, seeded_entities):
 
     async with session_factory() as session:
         n = await session.get(AlertNotification, notif_id)
+        assert n is not None
         assert n.status == NotificationStatus.FAILED
         assert n.attempts == 3
         assert "503 Service Unavailable" in (n.last_error or "")
 
 
-async def test_concurrent_dispatchers_never_duplicate(session_factory, seeded_entities):
+async def test_concurrent_dispatchers_never_duplicate(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
     """Dos dispatchers en paralelo con SKIP LOCKED no procesan la misma fila."""
     entities = seeded_entities
     now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
