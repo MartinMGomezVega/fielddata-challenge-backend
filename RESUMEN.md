@@ -47,7 +47,7 @@ Name                                                          Stmts   Miss Branc
 ---------------------------------------------------------------------------------------------------------
 src/agrobot/application/ports.py                                 25      0      0      0   100%
 src/agrobot/application/use_cases/__init__.py                     0      0      0      0   100%
-src/agrobot/application/use_cases/dispatch_notifications.py      90      4     12      4    92%   59, 67, 109, 139
+src/agrobot/application/use_cases/dispatch_notifications.py      90      3     12      3    94%   59, 67, 139
 src/agrobot/application/use_cases/evaluate_alerts.py            116      8     26      3    88%   149, 229, 247-257
 src/agrobot/application/use_cases/manage_alerts.py              106     15     30      7    84%   43, 45->47, 50-51, 61-62, 67-72, 133, 161, 174, 176->191, 185
 src/agrobot/domain/__init__.py                                    0      0      0      0   100%
@@ -56,10 +56,10 @@ src/agrobot/domain/enums.py                                      14      0      
 src/agrobot/domain/errors.py                                     11      0      0      0   100%
 src/agrobot/domain/evaluator.py                                  27      0     16      0   100%
 ---------------------------------------------------------------------------------------------------------
-TOTAL                                                           452     27     84     14    91%
+TOTAL                                                           452     26     84     13    92%
 
-Required test coverage of 90% reached. Total coverage: 91.23%
-42 passed in 3.41s
+Required test coverage of 90% reached. Total coverage: 91.60%
+42 passed in 3.39s
 ```
 
 ---
