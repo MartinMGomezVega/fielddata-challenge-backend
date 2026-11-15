@@ -1,0 +1,368 @@
+openapi: 3.1.0
+info:
+  title: Agrobot - Climate Alerts API
+  version: 1.0.0
+  description: |
+    API para configurar alertas climáticas sobre campos y consultar las
+    notificaciones generadas por el evaluador en background.
+
+    **Contrato primero (SDD):** este archivo es la fuente de verdad. Los schemas
+    Pydantic de `api/schemas` se escriben para respetarlo y un test compara el
+    OpenAPI generado por FastAPI contra este archivo.
+
+    **Autenticación:** fuera de alcance. Se simula con el header `X-User-Id`
+    (en Agrobot real vendría del número de WhatsApp autenticado / un JWT).
+    Todas las consultas se filtran por ese usuario: un recurso ajeno responde
+    404 (no 403) para no filtrar existencia.
+
+    **Escala:** `probability` y `threshold` son porcentajes 0-100 con 2 decimales.
+    Una alerta se dispara cuando `probability >= threshold`.
+servers:
+  - url: http://localhost:8000
+security:
+  - UserHeader: []
+
+tags:
+  - name: Alerts
+  - name: Notifications
+  - name: Forecasts
+  - name: Health
+
+paths:
+  /api/v1/alerts:
+    post:
+      tags: [Alerts]
+      operationId: createAlert
+      summary: Crear una alerta sobre un campo
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertCreate" }
+            example: { field_id: "6f1c...", event_type: frost, threshold: 60 }
+      responses:
+        "201":
+          description: Creada
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/alerts/{id}" }
+            ETag: { $ref: "#/components/headers/ETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "404": { $ref: "#/components/responses/NotFound" }        # campo inexistente o ajeno
+        "409": { $ref: "#/components/responses/Conflict" }        # misma regla viva ya existe
+        "422": { $ref: "#/components/responses/ValidationError" }
+    get:
+      tags: [Alerts]
+      operationId: listAlerts
+      summary: Listar mis alertas (paginado por cursor)
+      parameters:
+        - { name: field_id, in: query, schema: { type: string, format: uuid } }
+        - { name: event_type, in: query, schema: { $ref: "#/components/schemas/WeatherEvent" } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/AlertStatus" } }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertPage" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /api/v1/alerts/{alert_id}:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    get:
+      tags: [Alerts]
+      operationId: getAlert
+      summary: Obtener una alerta
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Alerts]
+      operationId: updateAlert
+      summary: Modificar umbral o pausar/reactivar
+      description: |
+        Concurrencia optimista: si se envía `If-Match` con el ETag (versión) y la
+        alerta cambió en el medio, responde 412. `field_id` y `event_type` son
+        inmutables: para cambiarlos se crea otra alerta (preserva la semántica
+        del historial de notificaciones).
+      parameters:
+        - { name: If-Match, in: header, required: false, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertUpdate" }
+            example: { threshold: 75 }
+      responses:
+        "200":
+          description: Actualizada
+          headers:
+            ETag: { $ref: "#/components/headers/ETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alert" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Alerts]
+      operationId: deleteAlert
+      summary: Eliminar una alerta (borrado lógico)
+      description: Idempotente. Borrar una alerta ya borrada o inexistente devuelve 204.
+      responses:
+        "204": { description: Eliminada }
+
+  /api/v1/alerts/{alert_id}/notifications:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    get:
+      tags: [Notifications]
+      operationId: listAlertNotifications
+      summary: Historial de notificaciones de una alerta
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: Mis notificaciones (bandeja)
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/NotificationStatus" } }
+        - { name: from_date, in: query, schema: { type: string, format: date }, description: "forecast_date >=" }
+        - { name: to_date, in: query, schema: { type: string, format: date }, description: "forecast_date <=" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPage" }
+
+  /api/v1/fields/{field_id}/forecasts:
+    get:
+      tags: [Forecasts]
+      operationId: listFieldForecasts
+      summary: Pronóstico almacenado para un campo (sólo lectura, útil para soporte/debug)
+      parameters:
+        - { name: field_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: from_date, in: query, schema: { type: string, format: date } }
+        - { name: to_date, in: query, schema: { type: string, format: date } }
+        - { name: event_type, in: query, schema: { $ref: "#/components/schemas/WeatherEvent" } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Forecast" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: liveness
+      security: []
+      summary: El proceso responde
+      responses:
+        "200": { description: OK }
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: readiness
+      security: []
+      summary: Puede atender tráfico (DB alcanzable)
+      responses:
+        "200": { description: OK }
+        "503": { description: Dependencia caída }
+
+components:
+  securitySchemes:
+    UserHeader:
+      type: apiKey
+      in: header
+      name: X-User-Id
+      description: UUID del usuario. Stand-in de autenticación para el challenge.
+
+  headers:
+    ETag:
+      description: Versión de la alerta (W/"<version>")
+      schema: { type: string }
+
+  parameters:
+    AlertId:
+      name: alert_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Cursor opaco devuelto en `next_cursor` (keyset pagination).
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Si se reintenta un POST con la misma key y el mismo body, se devuelve la
+        respuesta original en vez de crear otra alerta. Útil porque el canal es
+        WhatsApp y los reintentos de red son la norma.
+      schema: { type: string, maxLength: 64 }
+
+  schemas:
+    WeatherEvent:
+      type: string
+      enum: [rain, frost, hail, strong_wind, heat_wave]
+    AlertStatus:
+      type: string
+      enum: [active, paused]
+    NotificationStatus:
+      type: string
+      enum: [pending, sent, failed]
+    Percentage:
+      type: number
+      minimum: 0
+      maximum: 100
+      multipleOf: 0.01
+
+    AlertCreate:
+      type: object
+      additionalProperties: false
+      required: [field_id, event_type, threshold]
+      properties:
+        field_id: { type: string, format: uuid }
+        event_type: { $ref: "#/components/schemas/WeatherEvent" }
+        threshold:
+          allOf: [{ $ref: "#/components/schemas/Percentage" }]
+          exclusiveMinimum: 0
+          description: Notificar cuando probability >= threshold.
+
+    AlertUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        threshold:
+          allOf: [{ $ref: "#/components/schemas/Percentage" }]
+          exclusiveMinimum: 0
+        status: { $ref: "#/components/schemas/AlertStatus" }
+
+    Alert:
+      type: object
+      required: [id, field_id, event_type, threshold, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        field_id: { type: string, format: uuid }
+        event_type: { $ref: "#/components/schemas/WeatherEvent" }
+        threshold: { $ref: "#/components/schemas/Percentage" }
+        status: { $ref: "#/components/schemas/AlertStatus" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AlertPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Alert" } }
+        next_cursor: { type: [string, "null"] }
+
+    Notification:
+      type: object
+      required: [id, alert_id, forecast_date, episode, event_type, probability, threshold, issued_at, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        alert_id: { type: string, format: uuid }
+        forecast_date: { type: string, format: date, description: "Fecha local del campo" }
+        episode:
+          type: integer
+          minimum: 1
+          description: N-ésimo cruce del umbral para esta alerta y fecha (re-aviso si bajó y volvió a subir).
+        issued_at: { type: string, format: date-time, description: "Emisión del pronóstico que disparó" }
+        event_type: { $ref: "#/components/schemas/WeatherEvent" }
+        probability: { $ref: "#/components/schemas/Percentage" }
+        threshold: { $ref: "#/components/schemas/Percentage" }
+        status: { $ref: "#/components/schemas/NotificationStatus" }
+        attempts: { type: integer }
+        created_at: { type: string, format: date-time }
+        sent_at: { type: [string, "null"], format: date-time }
+
+    NotificationPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+        next_cursor: { type: [string, "null"] }
+
+    Forecast:
+      type: object
+      required: [forecast_date, event_type, probability, issued_at, ingested_at]
+      properties:
+        issued_at: { type: string, format: date-time }
+        forecast_date: { type: string, format: date }
+        event_type: { $ref: "#/components/schemas/WeatherEvent" }
+        probability: { $ref: "#/components/schemas/Percentage" }
+        ingested_at: { type: string, format: date-time }
+
+    Problem:
+      description: Error en formato RFC 9457 (application/problem+json)
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, example: "https://agrobot.dev/problems/alert-conflict" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              loc: { type: array, items: { type: string } }
+              msg: { type: string }
+
+  responses:
+    NotFound:
+      description: No existe o no pertenece al usuario
+      content:
+        application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } }
+    Conflict:
+      description: Ya existe una alerta viva con el mismo campo, evento y umbral
+      content:
+        application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } }
+    PreconditionFailed:
+      description: El ETag de If-Match no coincide (la alerta cambió)
+      content:
+        application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } }
+    ValidationError:
+      description: Request inválido
+      content:
+        application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } }
