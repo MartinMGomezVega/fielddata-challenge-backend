@@ -85,7 +85,7 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(InvalidThreshold)
     async def invalid_threshold_handler(request: Request, exc: InvalidThreshold) -> JSONResponse:
         return make_problem_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             problem_type="https://agrobot.dev/problems/validation-error",
             title="Validation Error",
             detail=exc.message,
@@ -97,7 +97,7 @@ def register_error_handlers(app: FastAPI) -> None:
         request: Request, exc: IdempotencyConflict
     ) -> JSONResponse:
         return make_problem_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             problem_type="https://agrobot.dev/problems/validation-error",
             title="Validation Error",
             detail=exc.message,
@@ -113,7 +113,7 @@ def register_error_handlers(app: FastAPI) -> None:
             for err in exc.errors()
         ]
         return make_problem_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             problem_type="https://agrobot.dev/problems/validation-error",
             title="Validation Error",
             detail="Request body or parameters validation failed",

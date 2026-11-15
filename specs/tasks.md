@@ -39,5 +39,5 @@ Orden pensado para que cada fase deje algo verde y commiteable. `[x]` = hecho en
 - [x] Test: el job registrado tiene `max_instances=1`, `coalesce=True`
 
 ## Fase 7 — Entrega
-- [ ] README: cómo correr (compose / local), cómo testear, decisiones, qué faltó
-- [ ] CI (GitHub Actions): lint, mypy, tests con servicio postgres
+- [x] README: cómo correr (compose / local), cómo testear, decisiones, qué faltó
+- [x] CI (GitHub Actions): lint, mypy, tests con servicio postgres

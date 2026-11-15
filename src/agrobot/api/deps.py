@@ -20,7 +20,7 @@ def get_current_user_id(
         return uuid.UUID(x_user_id)
     except ValueError as err:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Formato de X-User-Id inválido: {x_user_id}",
         ) from err
 

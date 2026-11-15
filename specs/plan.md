@@ -256,3 +256,36 @@ scheduler.add_job(
 | Evaluación reactiva | Polling | Que el ingestor emita `NOTIFY forecasts_updated` y el worker evalúe sólo esos campos. |
 | Historial de pronósticos | Se pisa (upsert) | Tabla de versiones si se necesita auditoría. |
 | Limpieza | — | Job de retención de notificaciones viejas / pronósticos pasados. |
+
+## 7. Decisiones tomadas durante la implementación
+
+Durante la construcción de las fases 1 a 6 se tomaron las siguientes decisiones técnicas complementarias y conservadoras, alineadas con Spec-Driven Development:
+
+1. **Idempotencia completa en `POST /alerts` (`Idempotency-Key`)**:
+   - Se implementó la tabla `idempotency_keys` con clave única `(user_id, idempotency_key)`, hash criptográfico SHA-256 del cuerpo de la petición (`payload_hash`), status HTTP y cuerpo de respuesta serializado en JSON, con caducidad tras 24 horas (`expires_at`).
+   - Si se reintenta con la misma clave y el mismo payload, se reenvía la respuesta cacheada sin re-ejecutar lógica de negocio.
+   - Si se reintenta con la misma clave pero distinto payload, se interrumpe y rechaza con `422 Unprocessable Entity` (`IdempotencyConflict` mapeado a RFC 9457 `application/problem+json`).
+
+2. **Serialización numérica de `Percentage` para conformidad estricta con OpenAPI**:
+   - `docs/openapi.yaml` define `Percentage` como `type: number` (ej. 60.0 o 59.99).
+   - En Python y SQLAlchemy se utiliza `Decimal` para evitar errores de precisión de punto flotante en comparaciones de umbrales (`probability >= threshold`).
+   - Para evitar que Pydantic v2 serialice `Decimal` como `string` en JSON de salida, se definió un tipo anotado con serializador explícito: `PercentageNumber = Annotated[Decimal, PlainSerializer(lambda x: float(x), return_type=float, when_used="json")]`. Esto preserva la exactitud interna y satisface el contrato OpenAPI 3.0 al 100%.
+
+3. **Aislamiento de sesiones en `DispatchNotifications` concurrente**:
+   - El worker despacha notificaciones fuera de la transacción de lease usando un semáforo de concurrencia (`asyncio.Semaphore`).
+   - Dado que `AsyncSession` de SQLAlchemy no admite operaciones concurrentes en la misma sesión, se inyectó una fábrica de unidades de trabajo (`uow_factory: Callable[[], UnitOfWork]`).
+   - Cada tarea concurrente de envío adquiere una sesión/UoW dedicada e independiente para actualizar el estado final (`sent` o reintento con backoff/`failed`), evitando condiciones de carrera de event loop o sesión compartida.
+
+4. **Tratamiento estricto de fechas y zonas horarias en UTC**:
+   - Todo instante en base de datos es almacenado en `TIMESTAMPTZ` y normalizado en UTC a través del puerto `Clock`.
+   - La fecha de corte local ("hoy") se evalúa por campo convirtiendo el instante UTC actual a la zona horaria IANA del campo con `zoneinfo.ZoneInfo(field.timezone)`.
+   - La ventana de evaluación queda estrictamente definida como `[hoy_campo, hoy_campo + horizon_days]`.
+
+5. **Aislamiento multi-inquilino y seguridad en endpoints REST**:
+   - La autenticación simulada lee el encabezado `X-User-Id`.
+   - Si un usuario intenta acceder, modificar o eliminar una alerta o recurso perteneciente a otro usuario o inexistente, el sistema responde invariablemente con `404 Not Found`, previniendo la enumeración de recursos o filtración de existencia de identificadores ajenos.
+
+6. **Control de concurrencia optimista en modificaciones (ETag / If-Match)**:
+   - Los endpoints de actualización exigen o validan el encabezado `If-Match: W/"<version>"` o `"<version>"`.
+   - Si la versión provista en la cabecera no coincide exactamente con la versión persistida en la base de datos, se rechaza la operación con `412 Precondition Failed` (`VersionConflict`).
+
