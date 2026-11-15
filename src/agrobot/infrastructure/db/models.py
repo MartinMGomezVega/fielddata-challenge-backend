@@ -24,6 +24,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     Date,
     DateTime,
@@ -153,7 +154,7 @@ class WeatherForecast(Base):
     __tablename__ = "weather_forecasts"
 
     id: Mapped[int] = mapped_column(
-        primary_key=True, autoincrement=True
+        BigInteger, primary_key=True, autoincrement=True
     )  # BIGSERIAL: tabla de alto volumen
     field_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("fields.id", ondelete="CASCADE"), nullable=False
@@ -336,7 +337,7 @@ class IdempotencyKey(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     key: Mapped[str] = mapped_column(String(64), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
