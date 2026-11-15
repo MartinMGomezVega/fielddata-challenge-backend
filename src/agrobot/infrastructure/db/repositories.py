@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-
 from typing import cast
 
 from sqlalchemy import func, select, tuple_
@@ -151,7 +150,7 @@ class SqlAlchemyForecastRepository:
             forecast_date=forecast.forecast_date,
             event_type=forecast.event_type,
             probability=forecast.probability,
-            source=forecast.source,
+            source=forecast.source or "mock",
             issued_at=forecast.issued_at,
             ingested_at=func.now(),
         )
@@ -266,9 +265,9 @@ class SqlAlchemyNotificationRepository:
             probability=notification.probability,
             threshold=notification.threshold,
             issued_at=notification.issued_at,
-            status=notification.status,
-            attempts=notification.attempts,
-            next_attempt_at=notification.next_attempt_at,
+            status=notification.status or NotificationStatus.PENDING,
+            attempts=notification.attempts if notification.attempts is not None else 0,
+            next_attempt_at=notification.next_attempt_at or func.now(),
             last_error=notification.last_error,
             sent_at=notification.sent_at,
             created_at=func.now(),

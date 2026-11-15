@@ -342,6 +342,12 @@ def test_rearm_margin_anti_flapping() -> None:
     d3 = evaluate(rule, f3, state, now_utc=now_utc, rearm_margin=margin)
     assert isinstance(d3, Rearm)
 
+    # Paso 4: Sin estar disparada previamente, prob en [55, 60) -> Rearm
+    state_unbreached = BreachState(rule.id, forecast_date, False, 1, f3.probability, f3.issued_at)
+    f4 = ForecastPoint(forecast_date, WeatherEvent.FROST, Decimal("57.00"), now_utc)
+    d4 = evaluate(rule, f4, state_unbreached, now_utc=now_utc, rearm_margin=margin)
+    assert isinstance(d4, Rearm)
+
 
 # --------------------------------------------------------------------------- #
 # Tests basados en propiedades (Hypothesis)

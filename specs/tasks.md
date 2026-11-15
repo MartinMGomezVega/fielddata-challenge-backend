@@ -22,10 +22,10 @@ Orden pensado para que cada fase deje algo verde y commiteable. `[x]` = hecho en
 - [x] `entities.py` + `evaluator.py` (máquina de estados: Skip / Hold / Rearm / Fire)
 
 ## Fase 4 — Casos de uso
-- [ ] `manage_alerts` con fakes en memoria (ownership, duplicado, versión)
-- [ ] `evaluate_alerts` (lotes, ON CONFLICT, RunReport)
-- [ ] `dispatch_notifications` (lease, backoff, failed) + `LoggingSender`
-- [ ] Tests de integración: AC-03, AC-11 (dos evaluadores concurrentes), AC-12, AC-13 contra Postgres real
+- [x] `manage_alerts` con fakes en memoria (ownership, duplicado, versión)
+- [x] `evaluate_alerts` (lotes, ON CONFLICT, RunReport)
+- [x] `dispatch_notifications` (lease, backoff, failed) + `LoggingSender`
+- [x] Tests de integración: AC-03, AC-11 (dos evaluadores concurrentes), AC-12, AC-13 contra Postgres real
 
 ## Fase 5 — API
 - [ ] Schemas Pydantic + routers según `openapi.yaml`
