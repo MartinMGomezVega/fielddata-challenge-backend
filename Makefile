@@ -1,4 +1,4 @@
-.PHONY: install up down migrate seed seed-docker test test-unit test-integration lint format postman
+.PHONY: install up down migrate seed seed-docker test test-unit test-integration lint format postman docs
 
 VENV = .venv
 BIN = $(VENV)/bin
@@ -41,3 +41,6 @@ format:
 
 postman:
 	npx --yes newman run postman/agrobot.postman_collection.json -e postman/agrobot.local.postman_environment.json
+
+docs:
+	@echo "Contrato en http://localhost:8080" && python3 -m http.server 8080 -d docs

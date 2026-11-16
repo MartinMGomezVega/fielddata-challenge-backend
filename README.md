@@ -342,7 +342,18 @@ Respuesta HTTP 200 OK:
 
 ---
 
-## 5. Ejecución de Tests y Cobertura
+## 5. Documentación de la API
+
+Existen tres formas de consultar la documentación interactiva:
+
+- **Contrato (fuente de verdad):** Ejecutando `make docs` se inicia un servidor local en `http://localhost:8080`, renderizando directamente el archivo [docs/openapi.yaml](docs/openapi.yaml) mediante Swagger UI estático sin dependencias de backend.
+- **API en vivo:** Con el stack levantado, Swagger UI está disponible en `http://localhost:8000/docs` y ReDoc en `http://localhost:8000/redoc` (generados automáticamente por FastAPI a partir del código).  
+  *Nota:* `tests/api/test_contract.py` verifica de forma automatizada que el contrato y la API en vivo coincidan.
+- **Online:** GitHub Pages: disponible tras activar Settings → Pages → Source: "GitHub Actions" mediante el workflow `.github/workflows/pages.yml`.
+
+---
+
+## 6. Ejecución de Tests y Cobertura
 
 La suite de pruebas incluye:
 1. **Tests unitarios**: Máquina de estados pura `evaluate()`, reglas de negocio y casos de uso con fakes en memoria.
@@ -366,7 +377,7 @@ make lint
 
 ---
 
-## 6. Decisiones Técnicas y Trade-offs
+## 7. Decisiones Técnicas y Trade-offs
 
 Las decisiones de diseño detalladas se encuentran en [specs/plan.md](specs/plan.md). En resumen:
 
@@ -380,7 +391,7 @@ Las decisiones de diseño detalladas se encuentran en [specs/plan.md](specs/plan
 
 ---
 
-## 7. Qué quedó afuera y por qué
+## 8. Qué quedó afuera y por qué
 
 Conforme a lo acordado en [specs/spec.md](specs/spec.md#6-fuera-de-alcance):
 
@@ -399,7 +410,7 @@ Conforme a lo acordado en [specs/spec.md](specs/spec.md#6-fuera-de-alcance):
 
 ---
 
-## 8. Comandos útiles del Makefile
+## 9. Comandos útiles del Makefile
 
 - `make install`: Instala el proyecto en modo editable y sus herramientas de desarrollo vía `uv`.
 - `make up`: Levanta todo el stack con `docker compose up --build -d`.
@@ -411,3 +422,4 @@ Conforme a lo acordado en [specs/spec.md](specs/spec.md#6-fuera-de-alcance):
 - `make lint`: Corre `ruff` (linter y format check) y `mypy --strict`.
 - `make format`: Autoformatea el código y aplica fixes de linter.
 - `make postman`: Ejecuta la suite de pruebas funcionales end-to-end con Newman.
+- `make docs`: Inicia un servidor web local en el puerto 8080 para visualizar la vista Swagger UI del contrato OpenAPI.
