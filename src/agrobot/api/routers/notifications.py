@@ -6,7 +6,7 @@ import uuid
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from agrobot.api.deps import get_current_user_id, get_uow
 from agrobot.api.schemas import (
@@ -35,12 +35,12 @@ async def list_alert_notifications(
     alert_id: uuid.UUID,
     user_id: Annotated[uuid.UUID, Depends(get_current_user_id)],
     uow: Annotated[UnitOfWork, Depends(get_uow)],
-    limit: int = 20,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: str | None = None,
 ) -> NotificationPage:
     async with uow as u:
-        alert = await u.alerts.get_by_id(alert_id, user_id)
-        if alert is None or alert.deleted_at is not None:
+        alert = await u.alerts.get_by_id_include_deleted(alert_id, user_id)
+        if alert is None:
             raise AlertNotFound(f"Alerta {alert_id} no encontrada")
 
         records, next_cursor = await u.notifications.get_by_alert(
@@ -65,7 +65,7 @@ async def list_notifications(
     status: NotificationStatus | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
-    limit: int = 20,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: str | None = None,
 ) -> NotificationPage:
     async with uow as u:

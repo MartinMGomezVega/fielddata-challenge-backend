@@ -11,15 +11,15 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
-from agrobot.domain.enums import AlertStatus, NotificationStatus, WeatherEvent
-from agrobot.infrastructure.db.models import (
+from agrobot.domain.entities import (
     Alert,
-    AlertBreachState,
-    AlertNotification,
+    BreachState,
     Field,
-    IdempotencyKey,
-    WeatherForecast,
+    Forecast,
+    IdempotencyRecord,
+    Notification,
 )
+from agrobot.domain.enums import AlertStatus, NotificationStatus, WeatherEvent
 
 
 class Clock(Protocol):
@@ -36,6 +36,10 @@ class AlertRepository(Protocol):
     async def create(self, alert: Alert) -> Alert: ...
 
     async def get_by_id(self, alert_id: uuid.UUID, user_id: uuid.UUID) -> Alert | None: ...
+
+    async def get_by_id_include_deleted(
+        self, alert_id: uuid.UUID, user_id: uuid.UUID
+    ) -> Alert | None: ...
 
     async def get_by_id_system(self, alert_id: uuid.UUID) -> Alert | None: ...
 
@@ -70,7 +74,7 @@ class AlertRepository(Protocol):
 class ForecastRepository(Protocol):
     """Puerto de persistencia para pronósticos meteorológicos."""
 
-    async def upsert(self, forecast: WeatherForecast) -> bool: ...
+    async def upsert(self, forecast: Forecast) -> bool: ...
 
     async def get_for_field(
         self,
@@ -79,7 +83,7 @@ class ForecastRepository(Protocol):
         from_date: date | None = None,
         to_date: date | None = None,
         event_type: WeatherEvent | None = None,
-    ) -> list[WeatherForecast]: ...
+    ) -> list[Forecast]: ...
 
     async def get_for_alerts(
         self,
@@ -87,7 +91,7 @@ class ForecastRepository(Protocol):
         event_types: list[WeatherEvent],
         from_date: date,
         to_date: date,
-    ) -> list[WeatherForecast]: ...
+    ) -> list[Forecast]: ...
 
 
 class BreachStateRepository(Protocol):
@@ -95,21 +99,24 @@ class BreachStateRepository(Protocol):
 
     async def get_states(
         self, alert_ids: list[uuid.UUID], forecast_dates: list[date]
-    ) -> dict[tuple[uuid.UUID, date], AlertBreachState]: ...
+    ) -> dict[tuple[uuid.UUID, date], BreachState]: ...
 
-    async def upsert_state(self, state: AlertBreachState) -> None: ...
+    async def upsert_state(self, state: BreachState) -> None: ...
 
 
 class NotificationRepository(Protocol):
-    """Puerto de persistencia para outbox de notificaciones."""
+    """Puerto de persistencia para notificaciones del outbox."""
 
-    async def create_if_not_exists(self, notification: AlertNotification) -> bool:
-        """Inserta con ON CONFLICT (alert_id, forecast_date, episode) DO NOTHING."""
-        ...
+    async def create_if_not_exists(self, notification: Notification) -> bool: ...
 
     async def get_by_alert(
-        self, alert_id: uuid.UUID, user_id: uuid.UUID, *, limit: int = 20, cursor: str | None = None
-    ) -> tuple[list[AlertNotification], str | None]: ...
+        self,
+        alert_id: uuid.UUID,
+        user_id: uuid.UUID,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> tuple[list[Notification], str | None]: ...
 
     async def list_by_user(
         self,
@@ -120,11 +127,11 @@ class NotificationRepository(Protocol):
         to_date: date | None = None,
         limit: int = 20,
         cursor: str | None = None,
-    ) -> tuple[list[AlertNotification], str | None]: ...
+    ) -> tuple[list[Notification], str | None]: ...
 
     async def claim_pending(
-        self, limit: int, lease_duration: timedelta
-    ) -> list[AlertNotification]: ...
+        self, limit: int, lease_duration: timedelta, now: datetime
+    ) -> list[Notification]: ...
 
     async def update_status(
         self,
@@ -137,9 +144,13 @@ class NotificationRepository(Protocol):
         sent_at: datetime | None = None,
     ) -> None: ...
 
+    async def mark_alert_notifications_failed(
+        self, alert_id: uuid.UUID, last_error: str
+    ) -> int: ...
+
 
 class FieldRepository(Protocol):
-    """Puerto de consulta de campos."""
+    """Puerto de persistencia para campos del productor."""
 
     async def get_by_id(
         self, field_id: uuid.UUID, user_id: uuid.UUID | None = None
@@ -147,26 +158,21 @@ class FieldRepository(Protocol):
 
 
 class IdempotencyRepository(Protocol):
-    """Puerto para deduplicación de mutaciones HTTP mediante Idempotency-Key."""
+    """Puerto para persistencia y verificación de llaves de idempotencia."""
 
-    async def get(self, user_id: uuid.UUID, key: str) -> IdempotencyKey | None: ...
+    async def get(self, user_id: uuid.UUID, key: str) -> IdempotencyRecord | None: ...
 
-    async def save(self, record: IdempotencyKey) -> None: ...
+    async def save(self, record: IdempotencyRecord) -> None: ...
 
 
 class NotificationSender(Protocol):
-    """Puerto para envío externo de notificaciones (ej. WhatsApp)."""
+    """Puerto para el canal de mensajería saliente (WhatsApp mock/real)."""
 
-    async def send(
-        self,
-        notification_id: uuid.UUID,
-        phone_number: str,
-        message: str,
-    ) -> bool: ...
+    async def send(self, notification_id: uuid.UUID, phone_number: str, message: str) -> bool: ...
 
 
 class JobLock(Protocol):
-    """Puerto para exclusión mutua distribuida entre réplicas del worker."""
+    """Puerto para exclusión mutua distribuida entre réplicas de workers."""
 
     async def try_acquire(self, lock_id: int) -> bool: ...
 
@@ -174,7 +180,7 @@ class JobLock(Protocol):
 
 
 class UnitOfWork(Protocol):
-    """Unidad de trabajo (Unit of Work) para transacciones compuestas."""
+    """Patrón Unit of Work para coordinar transacciones atómicas."""
 
     alerts: AlertRepository
     forecasts: ForecastRepository

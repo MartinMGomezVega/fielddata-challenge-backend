@@ -1,14 +1,12 @@
-"""Caso de uso: DispatchNotifications (Job en Background).
+"""Caso de uso: DispatchNotifications (Outbox Worker con Lease Pattern).
 
-Reclama notificaciones pendientes mediante patrón lease (FOR UPDATE SKIP LOCKED)
-en una transacción corta, y realiza los envíos fuera de la transacción con concurrencia
-acotada, idempotencia y reintentos con backoff exponencial.
+Reclama notificaciones pendientes con FOR UPDATE SKIP LOCKED y despacha a WhatsApp
+en paralelo acotado por un semáforo asincrónico.
 """
 
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 import uuid
 from collections.abc import Callable
@@ -26,6 +24,8 @@ logger = get_logger("jobs.dispatch_notifications")
 
 @dataclass(frozen=True)
 class DispatchReport:
+    """Reporte estructurado de la corrida de despacho de notificaciones."""
+
     run_id: str
     claimed: int
     sent: int
@@ -38,12 +38,12 @@ class DispatchReport:
 class NotificationPayload:
     id: uuid.UUID
     attempts: int
-    phone_number: str
+    phone_number: str | None
     message: str
 
 
 class DispatchNotifications:
-    """Orquestador de entrega de notificaciones."""
+    """Orquestador del envío confiable de notificaciones desde el outbox."""
 
     def __init__(
         self,
@@ -58,7 +58,6 @@ class DispatchNotifications:
         if callable(uow):
             self._uow_factory = uow
         else:
-            # Si se pasa una instancia de UoW, clonar una fábrica para no compartir sesión
             session_factory = getattr(uow, "_session_factory", None)
             if session_factory is not None:
                 uow_cls = cast(Callable[[Any], UnitOfWork], type(uow))
@@ -76,20 +75,17 @@ class DispatchNotifications:
     async def run(self) -> DispatchReport:
         run_id = str(uuid.uuid4())
         start_time = time.monotonic()
+        now_utc = self._clock.now_utc()
 
-        # Fase 1: Reclamar notificaciones en una transacción corta
+        # Fase 1: Reclamar notificaciones en una transacción corta pasando el reloj actual
         payloads: list[NotificationPayload] = []
         async with self._uow_factory() as uow:
             claimed_records = await uow.notifications.claim_pending(
                 limit=self._batch_size,
                 lease_duration=self._lease_duration,
+                now=now_utc,
             )
             for notif in claimed_records:
-                phone = (
-                    notif.alert.user.phone_number
-                    if (notif.alert and notif.alert.user)
-                    else "+5490000000000"
-                )
                 msg = (
                     f"Alerta meteorológica: riesgo de {notif.event_type.value} "
                     f"para el {notif.forecast_date}. Probabilidad: {notif.probability}% "
@@ -99,7 +95,7 @@ class DispatchNotifications:
                     NotificationPayload(
                         id=notif.id,
                         attempts=notif.attempts,
-                        phone_number=phone,
+                        phone_number=notif.recipient_phone,
                         message=msg,
                     )
                 )
@@ -128,6 +124,25 @@ class DispatchNotifications:
         # Fase 2: Enviar fuera de la transacción con concurrencia controlada
         async def _dispatch_single(item: NotificationPayload) -> None:
             nonlocal sent_count, retried_count, failed_count
+
+            # Bloque 4 Bug 8: Si no hay teléfono destinatario, marcar failed sin llamar al sender
+            if not item.phone_number:
+                logger.warning(
+                    "dispatch_missing_recipient_phone",
+                    notification_id=str(item.id),
+                )
+                async with self._uow_factory() as uow:
+                    await uow.notifications.update_status(
+                        notification_id=item.id,
+                        status=NotificationStatus.FAILED,
+                        attempts=item.attempts,
+                        sent_at=None,
+                        last_error="missing_recipient",
+                    )
+                    await uow.commit()
+                failed_count += 1
+                return
+
             async with self._semaphore:
                 try:
                     success = await self._sender.send(
@@ -161,6 +176,7 @@ class DispatchNotifications:
                                 notification_id=item.id,
                                 status=NotificationStatus.FAILED,
                                 attempts=item.attempts,
+                                sent_at=None,
                                 last_error=err_msg,
                             )
                             await uow.commit()
@@ -172,10 +188,9 @@ class DispatchNotifications:
                             error=err_msg,
                         )
                     else:
-                        # Backoff exponencial con jitter: (2^attempts * 5) + jitter [0..5]s
-                        backoff = (2**item.attempts) * 5 + random.uniform(0, 5)
-                        next_attempt = now + timedelta(seconds=backoff)
-
+                        # Backoff exponencial: 2^(attempts-1) * 30 segundos
+                        backoff_seconds = (2 ** (item.attempts - 1)) * 30
+                        next_attempt = now + timedelta(seconds=backoff_seconds)
                         async with self._uow_factory() as uow:
                             await uow.notifications.update_status(
                                 notification_id=item.id,
@@ -183,29 +198,23 @@ class DispatchNotifications:
                                 attempts=item.attempts,
                                 next_attempt_at=next_attempt,
                                 last_error=err_msg,
+                                sent_at=None,
                             )
                             await uow.commit()
                         retried_count += 1
                         logger.warning(
-                            "notification_dispatch_retry_scheduled",
+                            "notification_retrying_backoff",
                             notification_id=str(item.id),
                             attempts=item.attempts,
                             next_attempt_at=next_attempt.isoformat(),
                             error=err_msg,
                         )
 
+        # Ejecutar envíos en paralelo acotado
         await asyncio.gather(*[_dispatch_single(p) for p in payloads])
 
-        duration = time.monotonic() - start_time
-        logger.info(
-            "dispatch_finished",
-            run_id=run_id,
-            sent=sent_count,
-            retried=retried_count,
-            failed=failed_count,
-            duration_s=round(duration, 3),
-        )
-        return DispatchReport(
+        duration = round(time.monotonic() - start_time, 3)
+        report = DispatchReport(
             run_id=run_id,
             claimed=len(payloads),
             sent=sent_count,
@@ -213,3 +222,13 @@ class DispatchNotifications:
             failed=failed_count,
             duration_seconds=duration,
         )
+        logger.info(
+            "dispatch_finished",
+            run_id=run_id,
+            claimed=report.claimed,
+            sent=report.sent,
+            retried=report.retried,
+            failed=report.failed,
+            duration_seconds=report.duration_seconds,
+        )
+        return report

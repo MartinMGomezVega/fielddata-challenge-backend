@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
-from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from fastapi.responses import JSONResponse
 
-from agrobot.api.deps import get_clock, get_current_user_id, get_manage_alerts, get_uow
+from agrobot.api.deps import get_current_user_id, get_manage_alerts
 from agrobot.api.schemas import (
     COMMON_RESPONSES,
     AlertCreate,
@@ -19,16 +17,14 @@ from agrobot.api.schemas import (
     AlertResponse,
     AlertUpdate,
 )
-from agrobot.application.ports import Clock, UnitOfWork
+from agrobot.application.etag import format_etag
 from agrobot.application.use_cases.manage_alerts import (
     CreateAlertDTO,
     ManageAlerts,
     UpdateAlertDTO,
-    format_etag,
 )
+from agrobot.domain.entities import Alert
 from agrobot.domain.enums import AlertStatus, WeatherEvent
-from agrobot.domain.errors import IdempotencyConflict
-from agrobot.infrastructure.db.models import IdempotencyKey
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["Alerts"])
 
@@ -50,58 +46,38 @@ async def create_alert(
     body: AlertCreate,
     user_id: Annotated[uuid.UUID, Depends(get_current_user_id)],
     service: Annotated[ManageAlerts, Depends(get_manage_alerts)],
-    uow: Annotated[UnitOfWork, Depends(get_uow)],
-    clock: Annotated[Clock, Depends(get_clock)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> Response:
     body_json = body.model_dump_json()
     body_hash = hashlib.sha256(body_json.encode("utf-8")).hexdigest()
 
-    # Manejo de Idempotency-Key si está presente
-    if idempotency_key is not None:
-        async with uow as u:
-            existing = await u.idempotency.get(user_id, idempotency_key)
-            if existing is not None:
-                if existing.request_hash != body_hash:
-                    raise IdempotencyConflict(
-                        "Misma Idempotency-Key pero con un payload diferente (422)"
-                    )
-                cached_headers: dict[str, str] = json.loads(existing.response_headers)
-                return JSONResponse(
-                    status_code=existing.response_code,
-                    content=json.loads(existing.response_body),
-                    headers=cached_headers,
-                )
+    def response_factory(alert: Alert) -> tuple[int, dict[str, str], dict[str, Any]]:
+        etag = format_etag(alert.version)
+        location = f"/api/v1/alerts/{alert.id}"
+        response_data = AlertResponse.model_validate(alert).model_dump(mode="json")
+        return status.HTTP_201_CREATED, {"ETag": etag, "Location": location}, response_data
 
     dto = CreateAlertDTO(
         user_id=user_id,
         field_id=body.field_id,
         event_type=body.event_type,
         threshold=body.threshold,
+        idempotency_key=idempotency_key,
+        payload_hash=body_hash if idempotency_key else None,
+        response_data_factory=response_factory if idempotency_key else None,
     )
-    alert = await service.create_alert(dto)
-    etag = format_etag(alert.version)
-    location = f"/api/v1/alerts/{alert.id}"
+    result = await service.create_alert(dto)
+    if result.is_cached:
+        return JSONResponse(
+            status_code=result.cached_status_code,
+            content=result.cached_body,
+            headers=result.cached_headers,
+        )
 
-    response_data = AlertResponse.model_validate(alert).model_dump(mode="json")
-
-    # Guardar llave de idempotencia con TTL de 24h
-    if idempotency_key is not None:
-        async with uow as u:
-            expires_at = clock.now_utc() + timedelta(hours=24)
-            key_record = IdempotencyKey(
-                id=uuid.uuid4(),
-                user_id=user_id,
-                key=idempotency_key,
-                request_hash=body_hash,
-                response_code=status.HTTP_201_CREATED,
-                response_headers=json.dumps({"ETag": etag, "Location": location}),
-                response_body=json.dumps(response_data),
-                expires_at=expires_at,
-            )
-            await u.idempotency.save(key_record)
-            await u.commit()
-
+    assert result.alert is not None
+    etag = format_etag(result.alert.version)
+    location = f"/api/v1/alerts/{result.alert.id}"
+    response_data = AlertResponse.model_validate(result.alert).model_dump(mode="json")
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content=response_data,
@@ -120,15 +96,15 @@ async def list_alerts(
     service: Annotated[ManageAlerts, Depends(get_manage_alerts)],
     field_id: uuid.UUID | None = None,
     event_type: WeatherEvent | None = None,
-    status_filter: AlertStatus | None = None,
-    limit: int = 20,
+    status: Annotated[AlertStatus | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: str | None = None,
 ) -> AlertPage:
     alerts, next_cursor = await service.list_alerts(
         user_id=user_id,
         field_id=field_id,
         event_type=event_type,
-        status=status_filter,
+        status=status,
         limit=limit,
         cursor=cursor,
     )

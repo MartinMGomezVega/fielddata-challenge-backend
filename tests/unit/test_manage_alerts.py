@@ -23,6 +23,7 @@ from agrobot.application.use_cases.manage_alerts import (
     ManageAlerts,
     UpdateAlertDTO,
 )
+from agrobot.domain.entities import Alert, Field
 from agrobot.domain.enums import AlertStatus, WeatherEvent
 from agrobot.domain.errors import (
     AlertNotFound,
@@ -32,7 +33,15 @@ from agrobot.domain.errors import (
     VersionConflict,
 )
 from agrobot.infrastructure.clock import FrozenClock
-from agrobot.infrastructure.db.models import Alert, Field
+
+
+class FakeNotificationRepository:
+    def __init__(self) -> None:
+        self.marked_failed: list[tuple[uuid.UUID, str]] = []
+
+    async def mark_alert_notifications_failed(self, alert_id: uuid.UUID, reason: str) -> int:
+        self.marked_failed.append((alert_id, reason))
+        return 0
 
 
 class FakeAlertRepository:
@@ -134,7 +143,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.fields: FieldRepository = field_repo
         self.forecasts: ForecastRepository = None  # type: ignore[assignment]
         self.breach_states: BreachStateRepository = None  # type: ignore[assignment]
-        self.notifications: NotificationRepository = None  # type: ignore[assignment]
+        self.notifications: NotificationRepository = FakeNotificationRepository()  # type: ignore[assignment]
         self.idempotency: IdempotencyRepository = None  # type: ignore[assignment]
 
     async def __aenter__(self) -> FakeUnitOfWork:

@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
-import base64
+import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
+from typing import Any
 
+from agrobot.application.etag import parse_etag
 from agrobot.application.ports import Clock, UnitOfWork
+from agrobot.domain.entities import Alert, IdempotencyRecord
 from agrobot.domain.enums import AlertStatus, WeatherEvent
 from agrobot.domain.errors import (
     AlertNotFound,
     DuplicateAlert,
     FieldNotFound,
+    IdempotencyConflict,
     InvalidThreshold,
     VersionConflict,
 )
-from agrobot.infrastructure.db.models import Alert
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,60 @@ class CreateAlertDTO:
     field_id: uuid.UUID
     event_type: WeatherEvent
     threshold: Decimal
+    idempotency_key: str | None = None
+    payload_hash: str | None = None
+    response_data_factory: Callable[[Alert], tuple[int, dict[str, str], dict[str, Any]]] | None = (
+        None
+    )
+
+
+@dataclass(frozen=True)
+class CreateAlertResult:
+    alert: Alert
+    is_cached: bool = False
+    cached_status_code: int = 201
+    cached_headers: dict[str, str] | None = None
+    cached_body: dict[str, Any] | None = None
+
+    @property
+    def id(self) -> uuid.UUID:
+        return self.alert.id
+
+    @property
+    def field_id(self) -> uuid.UUID:
+        return self.alert.field_id
+
+    @property
+    def user_id(self) -> uuid.UUID:
+        return self.alert.user_id
+
+    @property
+    def event_type(self) -> WeatherEvent:
+        return self.alert.event_type
+
+    @property
+    def threshold(self) -> Decimal:
+        return self.alert.threshold
+
+    @property
+    def status(self) -> AlertStatus:
+        return self.alert.status
+
+    @property
+    def version(self) -> int:
+        return self.alert.version
+
+    @property
+    def deleted_at(self) -> Any:
+        return self.alert.deleted_at
+
+    @property
+    def created_at(self) -> Any:
+        return self.alert.created_at
+
+    @property
+    def updated_at(self) -> Any:
+        return self.alert.updated_at
 
 
 @dataclass(frozen=True)
@@ -37,41 +95,6 @@ class UpdateAlertDTO:
     if_match: str | None = None
 
 
-def parse_etag(etag: str | None) -> int | None:
-    """Extrae la versión numérica de un header ETag (ej. 'W/"3"' o '"3"' o '3')."""
-    if not etag:
-        return None
-    cleaned = etag.strip()
-    if cleaned.startswith("W/"):
-        cleaned = cleaned[2:]
-    cleaned = cleaned.strip('"')
-    try:
-        return int(cleaned)
-    except ValueError:
-        return None
-
-
-def format_etag(version: int) -> str:
-    """Genera el ETag débil estándar según especificación."""
-    return f'W/"{version}"'
-
-
-def encode_cursor(created_at: datetime, item_id: uuid.UUID) -> str:
-    """Genera un cursor opaco codificado en base64 para keyset pagination."""
-    raw = f"{created_at.isoformat()}_{item_id}"
-    return base64.urlsafe_b64encode(raw.encode()).decode()
-
-
-def decode_cursor(cursor_str: str) -> tuple[datetime, uuid.UUID] | None:
-    """Decodifica un cursor opaco."""
-    try:
-        raw = base64.urlsafe_b64decode(cursor_str.encode()).decode()
-        dt_str, id_str = raw.split("_", 1)
-        return datetime.fromisoformat(dt_str), uuid.UUID(id_str)
-    except Exception:
-        return None
-
-
 class ManageAlerts:
     """Servicio de aplicación para operaciones sobre alertas."""
 
@@ -79,24 +102,55 @@ class ManageAlerts:
         self._uow = uow
         self._clock = clock
 
-    async def create_alert(self, dto: CreateAlertDTO) -> Alert:
-        """Crea una nueva alerta para un campo del usuario.
+    async def create_alert(self, dto: CreateAlertDTO) -> CreateAlertResult:
+        """Crea una nueva alerta para un campo del usuario de forma atómica.
 
         Valida:
         1. 0 < threshold <= 100
         2. El campo existe y pertenece al usuario (RF-02 -> 404)
         3. No existe otra regla viva idéntica (RF-03 -> 409)
+        4. Idempotencia: si se provee Idempotency-Key, guarda y verifica en la misma transacción.
         """
         if dto.threshold <= Decimal("0.00") or dto.threshold > Decimal("100.00"):
             raise InvalidThreshold(
                 f"El umbral {dto.threshold} debe ser mayor a 0 y menor o igual a 100"
             )
 
+        now = self._clock.now_utc()
+
         async with self._uow as uow:
+            # 1. Chequeo de idempotencia si la clave está presente
+            if dto.idempotency_key and dto.payload_hash:
+                existing = await uow.idempotency.get(dto.user_id, dto.idempotency_key)
+                if existing is not None and existing.expires_at > now:
+                    if existing.request_hash != dto.payload_hash:
+                        raise IdempotencyConflict(
+                            "Misma Idempotency-Key pero con un payload diferente (422)"
+                        )
+                    cached_body_dict = json.loads(existing.response_body)
+                    cached_alert = Alert(
+                        id=uuid.UUID(cached_body_dict["id"]),
+                        field_id=uuid.UUID(cached_body_dict["field_id"]),
+                        user_id=dto.user_id,
+                        event_type=WeatherEvent(cached_body_dict["event_type"]),
+                        threshold=Decimal(str(cached_body_dict["threshold"])),
+                        status=AlertStatus(cached_body_dict["status"]),
+                        version=1,
+                    )
+                    return CreateAlertResult(
+                        alert=cached_alert,
+                        is_cached=True,
+                        cached_status_code=existing.response_code,
+                        cached_headers=json.loads(existing.response_headers),
+                        cached_body=cached_body_dict,
+                    )
+
+            # 2. Validación de campo y pertenencia
             field = await uow.fields.get_by_id(dto.field_id, user_id=dto.user_id)
             if field is None:
                 raise FieldNotFound(f"Campo {dto.field_id} no encontrado o no pertenece al usuario")
 
+            # 3. Validación de regla duplicada activa
             is_duplicate = await uow.alerts.exists_active(
                 field_id=dto.field_id,
                 event_type=dto.event_type,
@@ -108,7 +162,7 @@ class ManageAlerts:
                     f"evento {dto.event_type} y umbral {dto.threshold}"
                 )
 
-            now = self._clock.now_utc()
+            # 4. Creación de la alerta
             alert = Alert(
                 id=uuid.uuid4(),
                 user_id=dto.user_id,
@@ -121,8 +175,44 @@ class ManageAlerts:
                 version=1,
             )
             created = await uow.alerts.create(alert)
+
+            # 5. Guardar clave de idempotencia en la MISMA transacción
+            if dto.idempotency_key and dto.payload_hash and dto.response_data_factory:
+                status_code, headers, body = dto.response_data_factory(created)
+                expires_at = now + timedelta(hours=24)
+                key_record = IdempotencyRecord(
+                    id=uuid.uuid4(),
+                    user_id=dto.user_id,
+                    key=dto.idempotency_key,
+                    request_hash=dto.payload_hash,
+                    response_code=status_code,
+                    response_headers=json.dumps(headers),
+                    response_body=json.dumps(body),
+                    created_at=now,
+                    expires_at=expires_at,
+                )
+                try:
+                    await uow.idempotency.save(key_record)
+                except Exception as err:
+                    # Si chocó por carrera concurrente con la misma clave:
+                    await uow.rollback()
+                    existing = await uow.idempotency.get(dto.user_id, dto.idempotency_key)
+                    if existing is not None and existing.expires_at > now:
+                        if existing.request_hash != dto.payload_hash:
+                            raise IdempotencyConflict(
+                                "Misma Idempotency-Key pero con un payload diferente (422)"
+                            ) from err
+                        return CreateAlertResult(
+                            alert=created,
+                            is_cached=True,
+                            cached_status_code=existing.response_code,
+                            cached_headers=json.loads(existing.response_headers),
+                            cached_body=json.loads(existing.response_body),
+                        )
+                    raise
+
             await uow.commit()
-            return created
+            return CreateAlertResult(alert=created, is_cached=False)
 
     async def get_alert(self, alert_id: uuid.UUID, user_id: uuid.UUID) -> Alert:
         """Obtiene una alerta por ID validando pertenencia."""
@@ -163,10 +253,10 @@ class ManageAlerts:
             # Validación de optimistic concurrency con If-Match
             if dto.if_match is not None:
                 expected_version = parse_etag(dto.if_match)
-                if expected_version is not None and alert.version != expected_version:
+                if expected_version is None or alert.version != expected_version:
                     raise VersionConflict(
-                        f"Versión de alerta desactualizada (esperada: {expected_version}, "
-                        f"actual: {alert.version})"
+                        "Versión de alerta desactualizada o encabezado If-Match malformado: "
+                        f"'{dto.if_match}'"
                     )
 
             if dto.threshold is not None:
@@ -198,13 +288,18 @@ class ManageAlerts:
             return updated
 
     async def delete_alert(self, alert_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        """Elimina lógicamente una alerta de forma idempotente (RF-06, AC-16)."""
+        """Elimina lógicamente una alerta y pasa sus notificaciones pendientes a failed."""
         async with self._uow as uow:
             alert = await uow.alerts.get_by_id(alert_id, user_id)
             if alert is None or alert.deleted_at is not None:
-                # Idempotente: borrar algo ya borrado o inexistente no falla
-                return
+                return  # DELETE idempotente (204)
 
-            alert.deleted_at = self._clock.now_utc()
+            now = self._clock.now_utc()
+            alert.deleted_at = now
+            alert.updated_at = now
             await uow.alerts.soft_delete(alert)
+
+            # En la misma transacción: cancelar notificaciones pendientes asociadas
+            await uow.notifications.mark_alert_notifications_failed(alert_id, "alert_deleted")
+
             await uow.commit()

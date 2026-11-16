@@ -15,10 +15,19 @@ from zoneinfo import ZoneInfo
 
 from agrobot.application.ports import Clock, JobLock, UnitOfWork
 from agrobot.config import settings
-from agrobot.domain.entities import AlertRule, BreachState, Fire, ForecastPoint, Hold, Rearm, Skip
+from agrobot.domain.entities import (
+    AlertRule,
+    BreachState,
+    Fire,
+    Forecast,
+    ForecastPoint,
+    Hold,
+    Notification,
+    Rearm,
+    Skip,
+)
 from agrobot.domain.enums import NotificationStatus
 from agrobot.domain.evaluator import evaluate
-from agrobot.infrastructure.db.models import AlertBreachState, AlertNotification, WeatherForecast
 from agrobot.logging import get_logger
 
 logger = get_logger("jobs.evaluate_alerts")
@@ -132,7 +141,7 @@ class EvaluateAlerts:
                     forecasts = await uow.forecasts.get_for_alerts(
                         field_ids, event_types, min_date, max_date
                     )
-                    forecast_map: dict[tuple[uuid.UUID, str], list[WeatherForecast]] = {}
+                    forecast_map: dict[tuple[uuid.UUID, str], list[Forecast]] = {}
                     forecast_dates: set[date] = set()
                     for f in forecasts:
                         key = (f.field_id, f.event_type.value)
@@ -171,19 +180,7 @@ class EvaluateAlerts:
                                 issued_at=f.issued_at,
                                 source=f.source,
                             )
-                            db_state = states_map.get((alert.id, f.forecast_date))
-                            prev_state = (
-                                BreachState(
-                                    alert_id=db_state.alert_id,
-                                    forecast_date=db_state.forecast_date,
-                                    is_breached=db_state.is_breached,
-                                    episode=db_state.episode,
-                                    last_probability=db_state.last_probability,
-                                    last_issued_at=db_state.last_issued_at,
-                                )
-                                if db_state
-                                else None
-                            )
+                            prev_state = states_map.get((alert.id, f.forecast_date))
 
                             decision = evaluate(
                                 rule,
@@ -197,8 +194,8 @@ class EvaluateAlerts:
 
                             if isinstance(decision, Fire):
                                 fired_count += 1
-                                # Actualizar estado
-                                new_state = AlertBreachState(
+                                # 1. Actualizar breach_state a is_breached=True con nuevo episodio
+                                new_state = BreachState(
                                     alert_id=alert.id,
                                     forecast_date=point.forecast_date,
                                     is_breached=True,
@@ -208,8 +205,8 @@ class EvaluateAlerts:
                                 )
                                 await uow.breach_states.upsert_state(new_state)
 
-                                # Crear notificación en outbox
-                                notification = AlertNotification(
+                                # 2. Insertar notificación en estado PENDING (idempotencia en DB)
+                                notification = Notification(
                                     id=uuid.uuid4(),
                                     alert_id=alert.id,
                                     forecast_date=point.forecast_date,
@@ -232,17 +229,18 @@ class EvaluateAlerts:
                                 held_count += 1
 
                             elif isinstance(decision, Rearm):
-                                rearmed_count += 1
-                                episode = prev_state.episode if prev_state else 0
-                                new_state = AlertBreachState(
-                                    alert_id=alert.id,
-                                    forecast_date=point.forecast_date,
-                                    is_breached=False,
-                                    episode=episode,
-                                    last_probability=point.probability,
-                                    last_issued_at=point.issued_at,
-                                )
-                                await uow.breach_states.upsert_state(new_state)
+                                # Bloque 4 Bug 10: Persistir Rearm sólo si previo era is_breached
+                                if prev_state is not None and prev_state.is_breached:
+                                    rearmed_count += 1
+                                    new_state = BreachState(
+                                        alert_id=alert.id,
+                                        forecast_date=point.forecast_date,
+                                        is_breached=False,
+                                        episode=prev_state.episode,
+                                        last_probability=point.probability,
+                                        last_issued_at=point.issued_at,
+                                    )
+                                    await uow.breach_states.upsert_state(new_state)
 
                             elif isinstance(decision, Skip):
                                 if decision.reason == "stale":
@@ -250,18 +248,20 @@ class EvaluateAlerts:
                                     logger.warning(
                                         "stale_forecast_skipped",
                                         field_id=str(alert.field_id),
+                                        event_type=alert.event_type.value,
                                         forecast_date=str(point.forecast_date),
                                         issued_at=point.issued_at.isoformat(),
                                     )
                                 elif decision.reason == "out_of_window":
                                     out_of_window_count += 1
 
+                    # Commit por lote
                     await uow.commit()
 
         finally:
             await self._lock.release(EVALUATE_ALERTS_LOCK_ID)
 
-        duration = time.monotonic() - start_time
+        duration = round(time.monotonic() - start_time, 3)
         report = RunReport(
             run_id=run_id,
             alerts_evaluated=alerts_evaluated,
@@ -276,11 +276,13 @@ class EvaluateAlerts:
         logger.info(
             "evaluate_alerts_finished",
             run_id=run_id,
-            evaluated=alerts_evaluated,
-            fired=fired_count,
-            held=held_count,
-            rearmed=rearmed_count,
-            stale=stale_count,
-            duration_s=round(duration, 3),
+            alerts_evaluated=report.alerts_evaluated,
+            fired=report.fired,
+            held=report.held,
+            rearmed=report.rearmed,
+            stale=report.stale,
+            out_of_window=report.out_of_window,
+            duplicated=report.duplicated,
+            duration_seconds=report.duration_seconds,
         )
         return report
