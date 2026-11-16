@@ -257,6 +257,15 @@ async def test_ac_15_patch_etag_optimistic_locking(
     assert r_ok.headers["ETag"] == 'W/"2"'
     assert r_ok.json()["threshold"] in ("75.00", 75.0)
 
+    # PATCH sin campos en el cuerpo -> 422
+    r_empty = await client.patch(
+        f"/api/v1/alerts/{alert_id}",
+        json={},
+        headers={**headers, "If-Match": 'W/"2"'},
+    )
+    assert r_empty.status_code == 422
+    assert r_empty.headers["content-type"] == "application/problem+json"
+
 
 async def test_ac_16_delete_idempotent(
     client: httpx.AsyncClient,

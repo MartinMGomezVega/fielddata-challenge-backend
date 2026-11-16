@@ -10,7 +10,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
 
 from agrobot.domain.enums import AlertStatus, NotificationStatus, WeatherEvent
 
@@ -60,6 +60,12 @@ class AlertUpdate(BaseModel):
         le=Decimal("100.00"),
     )
     status: AlertStatus | None = None
+
+    @model_validator(mode="after")
+    def validate_min_properties(self) -> AlertUpdate:
+        if self.threshold is None and self.status is None:
+            raise ValueError("Al menos un campo (threshold o status) debe ser provisto")
+        return self
 
 
 class AlertResponse(BaseModel):

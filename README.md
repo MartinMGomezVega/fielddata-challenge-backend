@@ -106,11 +106,12 @@ Requiere Docker y Docker Compose instalados.
    ```bash
    docker compose up --build -d
    ```
-   Esto iniciará:
+   Esto orquesta de forma totalmente automática:
    - `db`: Base de datos PostgreSQL 16 con healthcheck.
    - `migrate`: Aplica las migraciones de Alembic (`alembic upgrade head`) y finaliza con exit 0.
-   - `api`: Servidor web FastAPI en `http://localhost:8000`.
-   - `worker`: Proceso en segundo plano ejecutando el evaluador y el despachador.
+   - `seed`: Siembra automáticamente los datos iniciales y pronósticos de prueba (el servicio `seed` es exclusivamente para demo y desarrollo local; en producción la tabla de pronósticos la llena el job de ingesta).
+   - `api`: Servidor web FastAPI en `http://localhost:8000` (inicia una vez completado el seed).
+   - `worker`: Proceso en segundo plano ejecutando la evaluación y el outbox dispatcher (inicia con los datos listos; su primera evaluación se ejecuta al arrancar y en ~30s despacha las notificaciones).
 
 3. **Verificar estado de salud**:
    ```bash
@@ -118,12 +119,12 @@ Requiere Docker y Docker Compose instalados.
    # {"status":"ready"}
    ```
 
-4. **Sembrar datos iniciales**:
+4. **Importar y correr la colección de Postman**:
+   Podés importar la colección `postman/agrobot.postman_collection.json` junto con el environment `postman/agrobot.local.postman_environment.json` en Postman, o correr directamente desde la terminal:
    ```bash
-   docker compose run --rm api python scripts/seed_forecasts.py
-   # o alternativamente:
-   make seed-docker
+   make postman
    ```
+   *(Pasa el 100% de los tests sin necesidad de ejecutar ningún comando de seed a mano).*
 
 ---
 
@@ -409,3 +410,4 @@ Conforme a lo acordado en [specs/spec.md](specs/spec.md#6-fuera-de-alcance):
 - `make test`: Ejecuta todos los tests con verificación de cobertura mínima del 90%.
 - `make lint`: Corre `ruff` (linter y format check) y `mypy --strict`.
 - `make format`: Autoformatea el código y aplica fixes de linter.
+- `make postman`: Ejecuta la suite de pruebas funcionales end-to-end con Newman.

@@ -1,4 +1,4 @@
-.PHONY: install up down migrate seed seed-docker test test-unit test-integration lint format
+.PHONY: install up down migrate seed seed-docker test test-unit test-integration lint format postman
 
 VENV = .venv
 BIN = $(VENV)/bin
@@ -38,3 +38,6 @@ lint:
 format:
 	$(BIN)/ruff format .
 	$(BIN)/ruff check --fix .
+
+postman:
+	npx --yes newman run postman/agrobot.postman_collection.json -e postman/agrobot.local.postman_environment.json

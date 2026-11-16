@@ -31,6 +31,24 @@ services:
       db:
         condition: service_healthy
 
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agrobot-seed
+    restart: "no"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/agrobot
+      ENVIRONMENT: production
+      LOG_LEVEL: INFO
+    healthcheck:
+      disable: true
+    command: ["python", "scripts/seed_forecasts.py"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   api:
     build:
       context: .
@@ -46,7 +64,7 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      migrate:
+      seed:
         condition: service_completed_successfully
 
   worker:
@@ -64,7 +82,7 @@ services:
       disable: true
     command: ["python", "-m", "agrobot.worker.main"]
     depends_on:
-      migrate:
+      seed:
         condition: service_completed_successfully
 
 volumes:
