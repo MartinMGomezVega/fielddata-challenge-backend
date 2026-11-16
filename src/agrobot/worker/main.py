@@ -1,7 +1,8 @@
 """Punto de entrada del proceso Worker (python -m agrobot.worker.main).
 
 Maneja señales del sistema operativo (SIGTERM, SIGINT) para un apagado ordenado
-sin cortar transacciones en curso (scheduler.shutdown(wait=True) y dispose_engine).
+sin cortar transacciones en curso: pausa el scheduler, espera los jobs en vuelo
+(hasta SHUTDOWN_TIMEOUT_S) y recién después cierra el scheduler y el engine.
 """
 
 from __future__ import annotations

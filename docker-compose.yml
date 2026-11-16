@@ -22,7 +22,9 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: agrobot-migrate
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/agrobot
       ENVIRONMENT: production
@@ -37,7 +39,9 @@ services:
       dockerfile: Dockerfile
     container_name: agrobot-seed
     restart: "no"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/agrobot
       ENVIRONMENT: production
@@ -55,7 +59,9 @@ services:
       dockerfile: Dockerfile
     container_name: agrobot-api
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/agrobot
       ENVIRONMENT: production
@@ -71,9 +77,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: agrobot-worker
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/agrobot
       ENVIRONMENT: production

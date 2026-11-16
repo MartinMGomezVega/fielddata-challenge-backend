@@ -12,7 +12,7 @@
 | Scheduler | APScheduler 3.x `AsyncIOScheduler` | Ligero, corre en el mismo event loop que nuestro código async. Celery/RQ agregan broker (Redis/Rabbit) para un problema que Postgres ya resuelve. |
 | Validación / config | Pydantic v2 + pydantic-settings | Estándar de FastAPI; settings 12-factor. |
 | Logs | structlog (JSON) | Logs consultables por campo (`run_id`, `alert_id`). |
-| Tests | pytest + pytest-asyncio + testcontainers[postgres] + httpx | Tests de integración contra **Postgres real**: usamos `ON CONFLICT`, `SKIP LOCKED`, índices parciales y advisory locks, que SQLite no tiene. |
+| Tests | pytest + pytest-asyncio + httpx + Postgres real (service en CI) | Tests de integración contra **Postgres real**: usamos `ON CONFLICT`, `SKIP LOCKED`, índices parciales y advisory locks, que SQLite no tiene. |
 | Calidad | ruff + mypy --strict + pre-commit, gestión con `uv` | |
 
 ## 2. Modelo de datos
@@ -123,7 +123,7 @@ agrobot-alerts/
 ├── scripts/seed_forecasts.py   simula el job de ingesta (upsert)
 ├── tests/
 │   ├── unit/                   evaluator + use cases con fakes en memoria
-│   ├── integration/            repositorios, locks, migraciones (testcontainers)
+│   ├── integration/            repositorios, locks, migraciones (Postgres real)
 │   └── api/                    httpx.AsyncClient contra la app
 ├── Dockerfile · docker-compose.yml (db, migrate, api, worker)
 └── pyproject.toml · alembic.ini · README.md
