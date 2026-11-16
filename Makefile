@@ -1,4 +1,4 @@
-.PHONY: install up down migrate seed test test-unit test-integration lint format
+.PHONY: install up down migrate seed seed-docker test test-unit test-integration lint format
 
 VENV = .venv
 BIN = $(VENV)/bin
@@ -17,6 +17,9 @@ migrate:
 
 seed:
 	$(BIN)/python scripts/seed_forecasts.py
+
+seed-docker:
+	docker compose run --rm api python scripts/seed_forecasts.py
 
 test:
 	$(BIN)/pytest --cov=src/agrobot/domain --cov=src/agrobot/application --cov-report=term-missing --cov-fail-under=90

@@ -36,7 +36,7 @@ ALERT_RAIN_80_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
 
 async def seed() -> None:
     configure_logging(settings.log_level)
-    logger.info("seed_starting", database_url=settings.database_url)
+    logger.info("seed_starting")
 
     engine = get_engine()
     session_factory = get_session_factory(engine)
