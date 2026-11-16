@@ -523,15 +523,13 @@ async def test_concurrent_posts_and_idempotency_race(
 
     # Verificar que solo hay 1 alerta en la base para heat_wave
     async with session_factory() as session:
-        alerts = (
-            await session.execute(
-                delete(Alert).where(
-                    Alert.event_type == WeatherEvent.HEAT_WAVE,
-                    Alert.threshold == Decimal("38.00"),
-                )
+        res = await session.execute(
+            delete(Alert).where(
+                Alert.event_type == WeatherEvent.HEAT_WAVE,
+                Alert.threshold == Decimal("38.00"),
             )
-        ).rowcount
-        assert alerts == 1
+        )
+        assert getattr(res, "rowcount", 0) == 1
 
     # 3. Reuso de Idempotency-Key vencida -> 201 nuevo reemplazando la clave
     expired_key = f"expired-key-{uuid.uuid4()}"

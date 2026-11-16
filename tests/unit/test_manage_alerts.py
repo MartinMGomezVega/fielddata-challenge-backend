@@ -54,6 +54,14 @@ class FakeAlertRepository:
 
     async def get_by_id(self, alert_id: uuid.UUID, user_id: uuid.UUID) -> Alert | None:
         alert = self.alerts.get(alert_id)
+        if alert and alert.user_id == user_id and alert.deleted_at is None:
+            return alert
+        return None
+
+    async def get_by_id_include_deleted(
+        self, alert_id: uuid.UUID, user_id: uuid.UUID
+    ) -> Alert | None:
+        alert = self.alerts.get(alert_id)
         if alert and alert.user_id == user_id:
             return alert
         return None

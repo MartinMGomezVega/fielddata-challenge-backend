@@ -197,7 +197,8 @@ async def seed() -> None:
                 where=stmt.excluded.issued_at > WeatherForecast.issued_at,
             )
             res = await session.execute(upsert_stmt)
-            if res.rowcount and res.rowcount > 0:
+            rowcount = getattr(res, "rowcount", 0)
+            if rowcount and rowcount > 0:
                 upserted_count += 1
 
         await session.commit()

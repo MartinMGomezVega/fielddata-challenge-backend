@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import (
 
 from agrobot.application.use_cases.dispatch_notifications import DispatchNotifications
 from agrobot.application.use_cases.evaluate_alerts import EvaluateAlerts
+from agrobot.domain.entities import Forecast, Notification
 from agrobot.domain.enums import AlertStatus, NotificationStatus, WeatherEvent
 from agrobot.infrastructure.clock import FrozenClock
 from agrobot.infrastructure.db.locks import PostgresAdvisoryLock
@@ -110,7 +111,7 @@ async def test_ac_03_repeated_evaluation_without_changes(
 
     # Insertar pronóstico 75%
     async with uow as u:
-        f = WeatherForecast(
+        f = Forecast(
             field_id=entities["field_id"],
             forecast_date=target_date,
             event_type=WeatherEvent.FROST,
@@ -159,7 +160,7 @@ async def test_ac_04_oscillation_90_30_90_end_to_end(
     # 1. Pronóstico 90% (cruza el umbral 60%)
     async with uow as u:
         await u.forecasts.upsert(
-            WeatherForecast(
+            Forecast(
                 field_id=entities["field_id"],
                 forecast_date=target_date,
                 event_type=WeatherEvent.FROST,
@@ -178,7 +179,7 @@ async def test_ac_04_oscillation_90_30_90_end_to_end(
     # 2. Pronóstico baja a 30% (rearma)
     async with uow as u:
         await u.forecasts.upsert(
-            WeatherForecast(
+            Forecast(
                 field_id=entities["field_id"],
                 forecast_date=target_date,
                 event_type=WeatherEvent.FROST,
@@ -198,7 +199,7 @@ async def test_ac_04_oscillation_90_30_90_end_to_end(
     # 3. Pronóstico vuelve a subir a 90% (nuevo episodio -> re-avisa)
     async with uow as u:
         await u.forecasts.upsert(
-            WeatherForecast(
+            Forecast(
                 field_id=entities["field_id"],
                 forecast_date=target_date,
                 event_type=WeatherEvent.FROST,
@@ -238,7 +239,7 @@ async def test_ac_04d_upsert_with_older_issued_at_is_ignored(
     uow = SqlAlchemyUnitOfWork(session_factory)
 
     # 1. Llega pronóstico con issued_at = now - 2h
-    f1 = WeatherForecast(
+    f1 = Forecast(
         field_id=entities["field_id"],
         forecast_date=target_date,
         event_type=WeatherEvent.FROST,
@@ -250,7 +251,7 @@ async def test_ac_04d_upsert_with_older_issued_at_is_ignored(
         await u.commit()
 
     # 2. Llega un lote desordenado con issued_at = now - 5h (más viejo)
-    f_old = WeatherForecast(
+    f_old = Forecast(
         field_id=entities["field_id"],
         forecast_date=target_date,
         event_type=WeatherEvent.FROST,
@@ -288,7 +289,7 @@ async def test_ac_04c_stale_skipped_in_evaluator_run(
 
     async with uow as u:
         await u.forecasts.upsert(
-            WeatherForecast(
+            Forecast(
                 field_id=entities["field_id"],
                 forecast_date=target_date,
                 event_type=WeatherEvent.FROST,
@@ -321,7 +322,7 @@ async def test_ac_11_concurrent_evaluators_advisory_lock(
     # Pronóstico 70%
     async with uow1 as u:
         await u.forecasts.upsert(
-            WeatherForecast(
+            Forecast(
                 field_id=entities["field_id"],
                 forecast_date=target_date,
                 event_type=WeatherEvent.FROST,
@@ -362,7 +363,7 @@ async def test_ac_12_sender_transient_failure_and_retry(
 
     # Crear notificación pendiente
     notif_id = uuid.uuid4()
-    notif = AlertNotification(
+    notif = Notification(
         id=notif_id,
         alert_id=entities["alert_id"],
         forecast_date=target_date,
@@ -422,7 +423,7 @@ async def test_ac_13_sender_permanent_failure(
 
     uow = SqlAlchemyUnitOfWork(session_factory)
     notif_id = uuid.uuid4()
-    notif = AlertNotification(
+    notif = Notification(
         id=notif_id,
         alert_id=entities["alert_id"],
         forecast_date=target_date,
@@ -486,7 +487,7 @@ async def test_concurrent_dispatchers_never_duplicate(
     async with uow1 as u:
         for ep in range(1, 11):
             await u.notifications.create_if_not_exists(
-                AlertNotification(
+                Notification(
                     id=uuid.uuid4(),
                     alert_id=entities["alert_id"],
                     forecast_date=target_date + timedelta(days=ep),
@@ -535,7 +536,7 @@ async def test_dispatcher_missing_recipient_phone_fails_without_calling_sender(
     notif_id = uuid.uuid4()
     async with uow as u:
         await u.notifications.create_if_not_exists(
-            AlertNotification(
+            Notification(
                 id=notif_id,
                 alert_id=entities["alert_id"],
                 forecast_date=target_date,
@@ -583,7 +584,7 @@ async def test_dispatcher_backoff_respects_clock(
     future_time = now_utc + timedelta(minutes=10)
     async with uow as u:
         await u.notifications.create_if_not_exists(
-            AlertNotification(
+            Notification(
                 id=notif_id,
                 alert_id=entities["alert_id"],
                 forecast_date=target_date,
@@ -628,7 +629,7 @@ async def test_evaluator_unnecessary_writes_zero_rows_on_low_forecast(
     # Pronóstico con probabilidad 30% (muy por debajo del umbral de 60%)
     async with uow as u:
         await u.forecasts.upsert(
-            WeatherForecast(
+            Forecast(
                 field_id=entities["field_id"],
                 forecast_date=target_date,
                 event_type=WeatherEvent.FROST,

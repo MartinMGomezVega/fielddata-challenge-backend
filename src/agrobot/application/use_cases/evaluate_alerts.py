@@ -59,7 +59,7 @@ class EvaluateAlerts:
         self,
         uow: UnitOfWork,
         clock: Clock,
-        job_lock: JobLock,
+        job_lock: JobLock | None = None,
         batch_size: int | None = None,
         horizon_days: int | None = None,
         max_age_hours: int | None = None,
