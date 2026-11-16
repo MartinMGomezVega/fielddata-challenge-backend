@@ -115,7 +115,7 @@ Requiere Docker y Docker Compose instalados.
 3. **Verificar estado de salud**:
    ```bash
    curl http://localhost:8000/health/ready
-   # {"status":"ready","database":"connected"}
+   # {"status":"ready"}
    ```
 
 4. **Sembrar datos iniciales**:
@@ -280,12 +280,12 @@ docker compose logs -f worker | grep notification_sent_success
 ```
 Salida en el log estructurado:
 ```text
-{"event": "notification_sent_success", "notification_id": "92da1575-d144-4861-bbd5-f85ee9180718", "alert_id": "55555555-5555-5555-5555-555555555555", "recipient": "+5491122334455", "level": "info", "timestamp": "2026-11-15T22:05:00.123456Z"}
+{"notification_id": "ee7bab9b-2b76-4dc4-ae89-8807cf480796", "phone_number": "+5491122334455", "message": "Alerta meteorológica: riesgo de frost para el 2026-11-16. Probabilidad: 60.00% (umbral configurado: 60.00%).", "attempt": 1, "event": "notification_sent_success", "logger": "notifications.sender", "level": "info", "timestamp": "2026-11-16T01:43:20.274220Z"}
 ```
 
-### 5. Consultar las notificaciones generadas (Inbox)
+### 5. Consultar las notificaciones generadas (Bandeja)
 ```bash
-curl -X GET "http://localhost:8000/api/v1/notifications/inbox?limit=10" \
+curl -X GET "http://localhost:8000/api/v1/notifications?limit=10" \
   -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
 ```
 Respuesta HTTP 200 OK:
@@ -293,14 +293,46 @@ Respuesta HTTP 200 OK:
 {
   "items": [
     {
-      "id": "92da1575-d144-4861-bbd5-f85ee9180718",
+      "id": "ee7bab9b-2b76-4dc4-ae89-8807cf480796",
       "alert_id": "55555555-5555-5555-5555-555555555555",
       "forecast_date": "2026-11-16",
       "episode": 1,
+      "event_type": "frost",
       "probability": 60.0,
-      "message": "Alerta meteorológica para Campo Los Molles (Córdoba): probabilidad de helada del 60.00% para el día 2026-11-16.",
+      "threshold": 60.0,
+      "issued_at": "2026-11-16T00:38:49.704142Z",
       "status": "sent",
-      "sent_at": "2026-11-15T22:05:00Z"
+      "attempts": 1,
+      "created_at": "2026-11-16T01:42:50.176413Z",
+      "sent_at": "2026-11-16T01:43:20.274340Z"
+    },
+    {
+      "id": "a3edfc81-d62d-4609-b0e2-fbee52b27538",
+      "alert_id": "66666666-6666-6666-6666-666666666666",
+      "forecast_date": "2026-11-18",
+      "episode": 1,
+      "event_type": "rain",
+      "probability": 85.0,
+      "threshold": 50.0,
+      "issued_at": "2026-11-15T23:38:49.704142Z",
+      "status": "sent",
+      "attempts": 1,
+      "created_at": "2026-11-16T01:42:50.176413Z",
+      "sent_at": "2026-11-16T01:43:20.274686Z"
+    },
+    {
+      "id": "6342c554-32b2-4a96-ae74-414c73e4e9d8",
+      "alert_id": "77777777-7777-7777-7777-777777777777",
+      "forecast_date": "2026-11-18",
+      "episode": 1,
+      "event_type": "rain",
+      "probability": 85.0,
+      "threshold": 80.0,
+      "issued_at": "2026-11-15T23:38:49.704142Z",
+      "status": "sent",
+      "attempts": 1,
+      "created_at": "2026-11-16T01:42:50.176413Z",
+      "sent_at": "2026-11-16T01:43:20.274883Z"
     }
   ],
   "next_cursor": null

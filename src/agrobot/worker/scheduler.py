@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -118,6 +119,7 @@ def create_scheduler(
         coalesce=True,
         misfire_grace_time=60,
         replace_existing=True,
+        next_run_time=datetime.now(UTC),
     )
 
     # Job 2: DispatchNotifications (cada DISPATCH_INTERVAL_S)
