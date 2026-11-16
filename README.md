@@ -22,75 +22,70 @@ Agrobot evalúa periódicamente pronósticos meteorológicos de 7 días contra r
 
 ## 2. Arquitectura del Sistema
 
-El proyecto sigue estrictamente **Clean Architecture**, asegurando que el dominio sea 100% puro e independiente de frameworks de presentación y de persistencia:
+El proyecto sigue **Clean Architecture**, asegurando que el dominio sea puro e independiente de frameworks de presentación y de persistencia:
 
+### Flujo de punta a punta
 ```mermaid
-flowchart TD
-    subgraph Clients["Clientes / Interfaces"]
-        CURL["CLI / cURL / Frontend"]
-        Cron["APScheduler Worker"]
+sequenceDiagram
+    autonumber
+    participant Ingest as Ingesta Mock / Cron
+    participant DB as PostgreSQL
+    participant Worker as Worker Evaluator
+    participant Domain as Motor de Dominio
+    participant Outbox as Outbox Dispatcher
+    participant Sender as Notification Sender
+
+    Ingest->>DB: Upsert pronósticos (ON CONFLICT DO UPDATE WHERE issued_at más reciente)
+    Note over Worker,DB: Advisory Lock en EvaluateAlerts (pg_try_advisory_xact_lock)
+    Worker->>DB: Consulta alertas activas y pronósticos en ventana [hoy, hoy + 7d]
+    Worker->>Domain: evaluate(rule, forecast, prev_state)
+    Domain-->>Worker: Decision: Fire(episode) / Hold / Rearm / Skip
+    alt Decision == Fire(episode)
+        Worker->>DB: Guarda AlertBreachState (is_breached=True) + Inserta AlertNotification (status=pending)
+    else Decision == Rearm
+        Worker->>DB: Actualiza AlertBreachState (is_breached=False)
     end
-
-    subgraph API_Layer["Capa API (FastAPI)"]
-        Router["Routers (/alerts, /notifications, /forecasts, /health)"]
-        Deps["Dependency Injection (Composition Root)"]
+    Note over Outbox,DB: Lease Pattern con SELECT FOR UPDATE SKIP LOCKED
+    Outbox->>DB: Reclama notificaciones pendientes (status=claimed, leased_until=now+lease)
+    Outbox->>Sender: send(user_phone, message)
+    alt Envío exitoso
+        Outbox->>DB: Marca notificación como sent (sent_at=now)
+    else Falla de envío
+        Outbox->>DB: Incrementa attempts y calcula next_attempt_at con backoff exponencial
     end
+```
 
-    subgraph Worker_Layer["Capa Worker (APScheduler)"]
-        JobEval["EvaluateAlerts Job (Advisory Lock + Batch Keyset)"]
-        JobDisp["DispatchNotifications Job (Outbox Lease + Semaphore)"]
-    end
+### Máquina de estados de la alerta
+```mermaid
+stateDiagram-v2
+    [*] --> Armado: Alerta creada / Estado inicial
 
-    subgraph Application["Capa de Aplicación (Casos de Uso & Puertos)"]
-        UsecaseAlerts["ManageAlerts (CRUD)"]
-        UsecaseEval["EvaluateAlerts (Orquestación)"]
-        UsecaseDisp["DispatchNotifications (Envío)"]
-        Ports["Protocols (Repositories, UnitOfWork, Sender, Clock)"]
-    end
+    Armado --> Disparado: probability >= threshold (Cruza umbral) / Genera Fire(episode=1)
+    Disparado --> Disparado: probability >= threshold - REARM_MARGIN (Se mantiene alta) / Hold (no repite aviso)
+    Disparado --> Re_armado: probability < threshold - REARM_MARGIN (Baja de umbral) / Rearm
+    Re_armado --> Re_armado: probability < threshold (Continúa baja) / Hold
+    Re_armado --> Disparado: probability >= threshold (Vuelve a subir) / Genera Fire(episode=episode+1)
+```
 
-    subgraph Domain["Capa de Dominio (Núcleo Puro)"]
-        Evaluator["evaluate() State Machine"]
-        Entities["Entities & Value Objects (AlertRule, ForecastPoint, BreachState)"]
-        Decisions["Decisions (Fire, Hold, Rearm, Skip)"]
-    end
+### Ciclo de vida de una notificación (Outbox pattern)
+```mermaid
+stateDiagram-v2
+    [*] --> pending: Evaluator genera Fire() e inserta registro
 
-    subgraph Infrastructure["Capa de Infraestructura (Adaptadores)"]
-        SQLA["SQLAlchemy Repositories + UnitOfWork"]
-        AdvLocks["Postgres Advisory Locks"]
-        OutboxSender["LoggingSender (WhatsApp Mock)"]
-        ClockAdapter["SystemClock (UTC)"]
-    end
+    pending --> claimed: Dispatcher adquiere lease con FOR UPDATE SKIP LOCKED
+    claimed --> sent: Sender entrega el mensaje exitosamente
+    claimed --> pending: Error transitorio (attempts < max_attempts) / Programado con backoff exponencial
+    claimed --> failed: Error fatal / Excedió max_attempts / Alerta borrada ('alert_deleted') / Sin teléfono destinatario
 
-    subgraph Database["Persistencia (PostgreSQL 16)"]
-        PG[(Postgres Tables & Enums)]
-    end
-
-    CURL --> Router
-    Router --> Deps --> UsecaseAlerts
-    Cron --> JobEval --> UsecaseEval
-    Cron --> JobDisp --> UsecaseDisp
-
-    UsecaseAlerts --> Ports
-    UsecaseEval --> Ports
-    UsecaseDisp --> Ports
-
-    UsecaseEval --> Evaluator
-    Evaluator --> Decisions
-    Evaluator --> Entities
-
-    Ports <|.. SQLA
-    Ports <|.. AdvLocks
-    Ports <|.. OutboxSender
-    Ports <|.. ClockAdapter
-
-    SQLA --> PG
-    AdvLocks --> PG
+    sent --> [*]
+    failed --> [*]
 ```
 
 ### Capas del Proyecto (`src/agrobot/`)
-- **`domain/`**: Núcleo libre de frameworks (`evaluator.py`, `entities.py`, `enums.py`, `errors.py`). Modela las entidades inmutables y la función determinística `evaluate()`.
-- **`application/`**: Casos de uso (`manage_alerts.py`, `evaluate_alerts.py`, `dispatch_notifications.py`) y puertos de abstracción (`ports.py`).
-- **`infrastructure/`**: Adaptadores secundarios de base de datos (`db/repositories.py`, `db/models.py`, `db/uow.py`, `db/locks.py`), reloj (`clock.py`) y mensajería (`notifications/logging_sender.py`).
+- **`domain/`**: Núcleo puro libre de dependencias externas (`evaluator.py`, `entities.py`, `enums.py`, `errors.py`). Modela las entidades de dominio y la función determinística `evaluate()`.
+- **`application/`**: Casos de uso (`manage_alerts.py`, `evaluate_alerts.py`, `dispatch_notifications.py`), paginación por cursor (`pagination.py`), utilidades de ETag (`etag.py`) y puertos de abstracción (`ports.py`).
+- **`infrastructure/`**: Adaptadores secundarios de base de datos (`db/repositories.py`, `db/models.py`, `db/mappers.py`, `db/uow.py`, `db/locks.py`), reloj (`clock.py`) y mensajería (`notifications/logging_sender.py`).
+  - *Ciclo de vida del Advisory Lock*: `PostgresAdvisoryLock` recibe una fábrica de sesiones (`session_factory`). La conexión a Postgres se abre puntualmente al ejecutar `try_acquire()` y se cierra de forma inmediata en `release()` (o si el lock no pudo adquirirse). Esto garantiza que el proceso worker no retenga conexiones en estado `idle in transaction` ni sature el pool durante sus períodos de reposo.
 - **`api/`**: Adaptadores primarios HTTP FastAPI (`routers/`, `deps.py`, `schemas.py`, `errors.py`).
 - **`worker/`**: Proceso de background daemon (`main.py`, `scheduler.py`).
 
@@ -109,11 +104,11 @@ Requiere Docker y Docker Compose instalados.
 
 2. **Levantar los servicios**:
    ```bash
-   docker compose up --build
+   docker compose up --build -d
    ```
    Esto iniciará:
    - `db`: Base de datos PostgreSQL 16 con healthcheck.
-   - `migrate`: Ejecuta `alembic upgrade head` y termina exitosamente.
+   - `migrate`: Aplica las migraciones de Alembic (`alembic upgrade head`) y finaliza con exit 0.
    - `api`: Servidor web FastAPI en `http://localhost:8000`.
    - `worker`: Proceso en segundo plano ejecutando el evaluador y el despachador.
 
@@ -121,6 +116,13 @@ Requiere Docker y Docker Compose instalados.
    ```bash
    curl http://localhost:8000/health/ready
    # {"status":"ready","database":"connected"}
+   ```
+
+4. **Sembrar datos iniciales**:
+   ```bash
+   docker compose run --rm api python scripts/seed_forecasts.py
+   # o alternativamente:
+   make seed-docker
    ```
 
 ---
@@ -131,14 +133,13 @@ Requiere **Python 3.12** y **PostgreSQL 16**.
 
 1. **Instalar `uv` y dependencias**:
    ```bash
-   # Crear entorno virtual e instalar dependencias con soporte de desarrollo
    uv venv
    source .venv/bin/activate
-   uv pip install -e ".[dev]"
+   uv sync --extra dev
    ```
 
 2. **Iniciar base de datos PostgreSQL**:
-   Asegurate de que Postgres esté corriendo en el puerto 5432 y creá la base de datos:
+   Asegurate de que Postgres esté corriendo en el puerto 5432 con usuario `postgres` y contraseña `postgres`:
    ```bash
    createdb agrobot
    createdb agrobot_test  # para los tests
@@ -167,62 +168,144 @@ Requiere **Python 3.12** y **PostgreSQL 16**.
 
 ---
 
-## 4. Prueba de punta a punta (End-to-End con cURL)
+## 4. Probando el Sistema de Punta a Punta
 
-El script `scripts/seed_forecasts.py` crea dos usuarios de prueba y tres campos:
-- **Usuario A**: `11111111-1111-1111-1111-111111111111`
-  - Campo 1 (La Campana, Córdoba): `a1111111-1111-1111-1111-111111111111`
-  - Campo 2 (El Triunfo, Córdoba): `a2222222-2222-2222-2222-222222222222`
-- **Usuario B**: `22222222-2222-2222-2222-222222222222`
-  - Campo 3 (Hokkaido Farm, Tokio): `b1111111-1111-1111-1111-111111111111`
+El script `scripts/seed_forecasts.py` puebla la base con los siguientes datos:
+- **2 Usuarios**:
+  - `11111111-1111-1111-1111-111111111111` ("Juan Perez", Teléfono: `+5491122334455`)
+  - `22222222-2222-2222-2222-222222222222` ("Akira Tanaka", Teléfono: `+819012345678`)
+- **2 Campos**:
+  - `33333333-3333-3333-3333-333333333333` ("Campo Los Molles (Córdoba)", zona horaria `America/Argentina/Cordoba`, propiedad de Juan Perez)
+  - `44444444-4444-4444-4444-444444444444` ("Paddy Field (Kanto)", zona horaria `Asia/Tokyo`, propiedad de Akira Tanaka)
+- **3 Alertas preexistentes en Córdoba (Juan Perez)**:
+  - Alerta 1 (`55555555-5555-5555-5555-555555555555`): Helada (`frost`), umbral 60.00%
+  - Alerta 2 (`66666666-6666-6666-6666-666666666666`): Lluvia (`rain`), umbral 50.00%
+  - Alerta 3 (`77777777-7777-7777-7777-777777777777`): Lluvia (`rain`), umbral 80.00%
 
-### 1. Sembrar la base de datos
+### 1. Listar las alertas existentes
 ```bash
-python scripts/seed_forecasts.py
-```
-*(Carga pronósticos con probabilidades de lluvia del 90%, 59.99%, casos de borde y fechas futuras).*
-
-### 2. Crear una alerta climática
-Creamos una alerta para que nos avise si la probabilidad de lluvia en "La Campana" supera o iguala el **60%**:
-```bash
-curl -X POST http://localhost:8000/alerts \
-  -H "Content-Type: application/json" \
-  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
-  -H "Idempotency-Key: demo-key-001" \
-  -d '{
-    "field_id": "a1111111-1111-1111-1111-111111111111",
-    "event_type": "rain",
-    "threshold": 60.00
-  }'
-```
-*Respuesta HTTP 201 Created con el ID de la alerta y ETag de versión.*
-
-### 3. Verificar idempotencia de la petición
-Si repetimos exactamente el mismo comando con la misma `Idempotency-Key`, obtenemos de inmediato la respuesta cacheada:
-```bash
-curl -X POST http://localhost:8000/alerts \
-  -H "Content-Type: application/json" \
-  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
-  -H "Idempotency-Key: demo-key-001" \
-  -d '{
-    "field_id": "a1111111-1111-1111-1111-111111111111",
-    "event_type": "rain",
-    "threshold": 60.00
-  }'
-```
-
-### 4. Ejecución del Worker y generación de alertas
-El worker en segundo plano (o tu job de evaluación) detecta la alerta activa:
-- Compara el umbral de 60% contra los pronósticos sembrados (que contienen fechas con 90% de probabilidad).
-- Dispara un `Fire(episode=1)` y escribe el aviso en la tabla `alert_notifications` con estado `pending`.
-- El despachador de notificaciones toma el registro con `SKIP LOCKED`, envía el WhatsApp simulado vía `LoggingSender` e interactúa con el estado a `sent`.
-
-### 5. Consultar las notificaciones generadas
-```bash
-curl -X GET "http://localhost:8000/notifications/inbox?limit=10" \
+curl -X GET "http://localhost:8000/api/v1/alerts" \
   -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
 ```
-*Retorna las notificaciones generadas en formato JSON con su estado `sent` y el texto enviado.*
+Respuesta HTTP 200 OK:
+```json
+{
+  "items": [
+    {
+      "id": "77777777-7777-7777-7777-777777777777",
+      "field_id": "33333333-3333-3333-3333-333333333333",
+      "event_type": "rain",
+      "threshold": 80.0,
+      "status": "active",
+      "version": 1,
+      "created_at": "2026-05-10T12:00:00Z",
+      "updated_at": "2026-05-10T12:00:00Z"
+    },
+    {
+      "id": "66666666-6666-6666-6666-666666666666",
+      "field_id": "33333333-3333-3333-3333-333333333333",
+      "event_type": "rain",
+      "threshold": 50.0,
+      "status": "active",
+      "version": 1,
+      "created_at": "2026-05-10T12:00:00Z",
+      "updated_at": "2026-05-10T12:00:00Z"
+    },
+    {
+      "id": "55555555-5555-5555-5555-555555555555",
+      "field_id": "33333333-3333-3333-3333-333333333333",
+      "event_type": "frost",
+      "threshold": 60.0,
+      "status": "active",
+      "version": 1,
+      "created_at": "2026-05-10T12:00:00Z",
+      "updated_at": "2026-05-10T12:00:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+### 2. Crear una nueva alerta climática (sin colisión de regla)
+Creamos una alerta para ola de calor (`heat_wave`) en "Campo Los Molles" con umbral 35.00%:
+```bash
+curl -i -X POST "http://localhost:8000/api/v1/alerts" \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "Idempotency-Key: demo-key-001" \
+  -d '{
+    "field_id": "33333333-3333-3333-3333-333333333333",
+    "event_type": "heat_wave",
+    "threshold": 35.00
+  }'
+```
+Respuesta HTTP 201 Created:
+```http
+HTTP/1.1 201 Created
+etag: W/"1"
+location: /api/v1/alerts/c3a067ff-2a13-4c07-a369-0df8eef3d4cb
+content-type: application/json
+
+{
+  "id": "c3a067ff-2a13-4c07-a369-0df8eef3d4cb",
+  "field_id": "33333333-3333-3333-3333-333333333333",
+  "event_type": "heat_wave",
+  "threshold": 35.0,
+  "status": "active",
+  "version": 1,
+  "created_at": "2026-11-15T22:00:00Z",
+  "updated_at": "2026-11-15T22:00:00Z"
+}
+```
+
+### 3. Verificar idempotencia de la petición
+Si repetimos exactamente el mismo comando con la misma cabecera `Idempotency-Key`, el backend devuelve la respuesta cacheada sin duplicar registros:
+```bash
+curl -i -X POST "http://localhost:8000/api/v1/alerts" \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "Idempotency-Key: demo-key-001" \
+  -d '{
+    "field_id": "33333333-3333-3333-3333-333333333333",
+    "event_type": "heat_wave",
+    "threshold": 35.00
+  }'
+```
+Retorna la misma respuesta HTTP 201 Created con el mismo cuerpo e identificadores.
+
+### 4. Observar al Worker evaluando y despachando
+El worker procesa periódicamente las evaluaciones y despacha las notificaciones por WhatsApp (simulado). Para observar los envíos en tiempo real:
+```bash
+docker compose logs -f worker | grep notification_sent_success
+```
+Salida en el log estructurado:
+```text
+{"event": "notification_sent_success", "notification_id": "92da1575-d144-4861-bbd5-f85ee9180718", "alert_id": "55555555-5555-5555-5555-555555555555", "recipient": "+5491122334455", "level": "info", "timestamp": "2026-11-15T22:05:00.123456Z"}
+```
+
+### 5. Consultar las notificaciones generadas (Inbox)
+```bash
+curl -X GET "http://localhost:8000/api/v1/notifications/inbox?limit=10" \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+Respuesta HTTP 200 OK:
+```json
+{
+  "items": [
+    {
+      "id": "92da1575-d144-4861-bbd5-f85ee9180718",
+      "alert_id": "55555555-5555-5555-5555-555555555555",
+      "forecast_date": "2026-11-16",
+      "episode": 1,
+      "probability": 60.0,
+      "message": "Alerta meteorológica para Campo Los Molles (Córdoba): probabilidad de helada del 60.00% para el día 2026-11-16.",
+      "status": "sent",
+      "sent_at": "2026-11-15T22:05:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
 
 ---
 
@@ -259,7 +342,7 @@ Las decisiones de diseño detalladas se encuentran en [specs/plan.md](specs/plan
 | **Deduplicación por episodio** | Máquina de estados en `alert_breach_states` | Previene el spam al productor si el pronóstico se mantiene alto durante días consecutivos, pero re-avisa si baja y vuelve a subir. |
 | **Outbox con Lease Pattern** | `FOR UPDATE SKIP LOCKED` con límite de lote | Desacopla el I/O de red del envío de WhatsApp de la transacción de evaluación. Permite escalar workers horizontalmente sin bloqueos. |
 | **Control de frescura (`issued_at`)** | `Skip(stale)` si supera 24h | Un pronóstico desactualizado no debe gatillar alarmas falsas ni cambiar el estado de episodios existentes. |
-| **Locks distribuidos** | `pg_try_advisory_xact_lock` | Evita que dos réplicas del worker evalúen el mismo lote de alertas simultáneamente, sin requerir infraestructura externa como Redis o Zookeeper. |
+| **Locks distribuidos** | `pg_try_advisory_xact_lock` con gestión de sesión puntual | Evita que réplicas de workers evalúen el mismo lote a la vez, liberando la conexión inmediatamente al terminar la corrida. |
 | **Persistencia de Decimales vs JSON** | `PercentageNumber` serializer | Mantiene precisión fija `NUMERIC(5,2)` en Postgres y comparaciones numéricas en Python, mientras genera `type: number` estricto en JSON para cumplir el contrato OpenAPI. |
 
 ---
@@ -289,7 +372,8 @@ Conforme a lo acordado en [specs/spec.md](specs/spec.md#6-fuera-de-alcance):
 - `make up`: Levanta todo el stack con `docker compose up --build -d`.
 - `make down`: Detiene los contenedores.
 - `make migrate`: Aplica las migraciones de Alembic a la última versión.
-- `make seed`: Puebla la base con datos de prueba realistas y casos borde.
+- `make seed`: Puebla la base local con datos de prueba realistas y casos borde.
+- `make seed-docker`: Puebla la base dentro de Docker Compose.
 - `make test`: Ejecuta todos los tests con verificación de cobertura mínima del 90%.
 - `make lint`: Corre `ruff` (linter y format check) y `mypy --strict`.
 - `make format`: Autoformatea el código y aplica fixes de linter.

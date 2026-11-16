@@ -44,7 +44,7 @@ async def seed() -> None:
     async with session_factory() as session:
         # 1. Usuarios
         users_data = [
-            {"id": USER_1_ID, "name": "Martin Gomez", "phone_number": "+5491122334455"},
+            {"id": USER_1_ID, "name": "Juan Perez", "phone_number": "+5491122334455"},
             {"id": USER_2_ID, "name": "Akira Tanaka", "phone_number": "+819012345678"},
         ]
         for u in users_data:

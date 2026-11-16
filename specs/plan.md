@@ -289,3 +289,25 @@ Durante la construcción de las fases 1 a 6 se tomaron las siguientes decisiones
    - Los endpoints de actualización exigen o validan el encabezado `If-Match: W/"<version>"` o `"<version>"`.
    - Si la versión provista en la cabecera no coincide exactamente con la versión persistida en la base de datos, se rechaza la operación con `412 Precondition Failed` (`VersionConflict`).
 
+7. **Cancelación inmediata de notificaciones pendientes al eliminar una alerta (`mark_alert_notifications_failed`)**:
+   - Al ejecutar `DELETE /api/v1/alerts/{alert_id}`, no sólo se realiza el soft delete (`deleted_at = now()`), sino que de inmediato se marcan todas sus notificaciones en estado `pending` como `failed` con `last_error = 'alert_deleted'`.
+   - Esto garantiza que el dispatcher nunca envíe notificaciones de alertas que el usuario acaba de eliminar, manteniendo consistencia inmediata en el canal de mensajería (AC-16).
+
+8. **Ciclo de vida de la conexión en `PostgresAdvisoryLock`**:
+   - `PostgresAdvisoryLock` admite una fábrica de sesiones (`async_sessionmaker[AsyncSession]`) o una sesión activa.
+   - En el worker, la conexión de base de datos se abre puntualmente en `try_acquire()`, y se libera y cierra de inmediato en `release()` (o ante fallo en adquisición).
+   - Esto evita que los workers retengan conexiones en estado `idle in transaction` o agoten el connection pool de PostgreSQL durante los intervalos de espera del scheduler.
+
+9. **Manejo atómico de concurrencia y claves de idempotencia (`Idempotency-Key`)**:
+   - La inserción de la alerta y el registro de la clave de idempotencia se realizan dentro de la misma transacción de base de datos.
+   - Ante colisiones concurrentes (dos solicitudes idénticas simultáneas), la excepción de clave duplicada se captura con rollback y re-lectura inmediata de la clave persistida por la solicitud paralela, retornando el resultado cacheado (201 Created) sin duplicar alertas en la base.
+   - Si una clave existente ya caducó (`expires_at <= now`), se permite su sobrescritura segura.
+
+10. **Escritura selectiva de `Rearm` en la máquina de estados**:
+    - `EvaluateAlerts` sólo persiste un estado `Rearm` (`is_breached = False`) en `alert_breach_states` si el estado previo existía y tenía `is_breached = True`.
+    - Esto previene escrituras innecesarias en la base de datos cuando el pronóstico se mantiene bajo continuamente, evitando inflación de filas en `alert_breach_states`.
+
+11. **Estandarización global de respuestas de error RFC 9457 (`application/problem+json`)**:
+    - Todos los errores HTTP (errores de validación 422, encabezados faltantes, errores de negocio 404/409/412 y excepciones 500 no controladas) se serializan bajo la especificación RFC 9457 con `type`, `title`, `status`, `detail`, e `instance`.
+
+
