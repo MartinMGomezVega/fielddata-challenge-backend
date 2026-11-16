@@ -9,7 +9,7 @@ from alembic.config import Config
 def test_alembic_migrations_lifecycle() -> None:
     alembic_cfg = Config("alembic.ini")
     db_url = os.environ.get(
-        "DATABASE_URL", "postgresql+asyncpg://martingomezvega@localhost:5432/agrobot_test"
+        "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
     )
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 

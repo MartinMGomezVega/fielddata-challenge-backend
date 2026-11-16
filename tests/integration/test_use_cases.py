@@ -45,7 +45,7 @@ from agrobot.infrastructure.db.uow import SqlAlchemyUnitOfWork
 from agrobot.infrastructure.notifications.logging_sender import LoggingSender
 
 TEST_DB_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+asyncpg://martingomezvega@localhost:5432/agrobot_test"
+    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
 )
 
 

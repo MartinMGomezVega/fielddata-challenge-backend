@@ -8,7 +8,7 @@ import pytest
 
 from agrobot.config import settings
 
-DEFAULT_TEST_DB = "postgresql+asyncpg://martingomezvega@localhost:5432/agrobot_test"
+DEFAULT_TEST_DB = "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
 
 
 @pytest.fixture(autouse=True, scope="session")
