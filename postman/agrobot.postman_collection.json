@@ -579,7 +579,7 @@
           ]
         },
         {
-          "name": "Paginación: primera página (limit=1)",
+          "name": "Paginación: primera página (page=1, page_size=1)",
           "request": {
             "method": "GET",
             "header": [
@@ -589,7 +589,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/alerts?limit=1",
+              "raw": "{{baseUrl}}/api/v1/alerts?page=1&page_size=1",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -600,12 +600,16 @@
               ],
               "query": [
                 {
-                  "key": "limit",
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "page_size",
                   "value": "1"
                 }
               ]
             },
-            "description": "El usuario A tiene 4 alertas (3 del seed + la creada): con limit=1 tiene que haber cursor."
+            "description": "El usuario A tiene 4 alertas (3 del seed + la creada): con page_size=1 tiene que haber siguiente página."
           },
           "event": [
             {
@@ -617,8 +621,14 @@
                   "",
                   "const b = pm.response.json();",
                   "pm.test(\"Devuelve 1 item\", () => pm.expect(b.items).to.have.length(1));",
-                  "pm.test(\"Devuelve next_cursor\", () => pm.expect(b.next_cursor).to.be.a(\"string\").and.not.empty);",
-                  "pm.collectionVariables.set(\"cursor\", b.next_cursor);",
+                  "pm.test(\"Meta tiene total, page, page_size y has_next=true\", () => {",
+                  "    pm.expect(b.meta).to.be.an(\"object\");",
+                  "    pm.expect(b.meta.page).to.eql(1);",
+                  "    pm.expect(b.meta.page_size).to.eql(1);",
+                  "    pm.expect(b.meta.total).to.be.at.least(4);",
+                  "    pm.expect(b.meta.has_next).to.be.true;",
+                  "    pm.expect(b.meta.has_prev).to.be.false;",
+                  "});",
                   "pm.collectionVariables.set(\"firstPageId\", b.items[0].id);"
                 ]
               }
@@ -626,7 +636,7 @@
           ]
         },
         {
-          "name": "Paginación: segunda página",
+          "name": "Paginación: segunda página (page=2, page_size=1)",
           "request": {
             "method": "GET",
             "header": [
@@ -636,7 +646,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/alerts?limit=1&cursor={{cursor}}",
+              "raw": "{{baseUrl}}/api/v1/alerts?page=2&page_size=1",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -647,16 +657,16 @@
               ],
               "query": [
                 {
-                  "key": "limit",
-                  "value": "1"
+                  "key": "page",
+                  "value": "2"
                 },
                 {
-                  "key": "cursor",
-                  "value": "{{cursor}}"
+                  "key": "page_size",
+                  "value": "1"
                 }
               ]
             },
-            "description": "El cursor trae el siguiente elemento, sin repetir."
+            "description": "La página 2 trae el siguiente elemento, sin repetir."
           },
           "event": [
             {
@@ -670,6 +680,10 @@
                   "pm.test(\"Devuelve 1 item distinto al de la primera página\", () => {",
                   "    pm.expect(b.items).to.have.length(1);",
                   "    pm.expect(b.items[0].id).to.not.eql(pm.collectionVariables.get(\"firstPageId\"));",
+                  "});",
+                  "pm.test(\"Meta refleja page=2 y has_prev=true\", () => {",
+                  "    pm.expect(b.meta.page).to.eql(2);",
+                  "    pm.expect(b.meta.has_prev).to.be.true;",
                   "});"
                 ]
               }
@@ -1221,7 +1235,7 @@
           ]
         },
         {
-          "name": "limit=0 → 422",
+          "name": "page_size=0 → 422",
           "request": {
             "method": "GET",
             "header": [
@@ -1231,7 +1245,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/alerts?limit=0",
+              "raw": "{{baseUrl}}/api/v1/alerts?page_size=0",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -1242,12 +1256,12 @@
               ],
               "query": [
                 {
-                  "key": "limit",
+                  "key": "page_size",
                   "value": "0"
                 }
               ]
             },
-            "description": "El contrato define 1 ≤ limit ≤ 100."
+            "description": "El contrato define 1 ≤ page_size ≤ 100."
           },
           "event": [
             {
@@ -1272,7 +1286,7 @@
           ]
         },
         {
-          "name": "limit=101 → 422",
+          "name": "page_size=101 → 422",
           "request": {
             "method": "GET",
             "header": [
@@ -1282,7 +1296,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/alerts?limit=101",
+              "raw": "{{baseUrl}}/api/v1/alerts?page_size=101",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -1293,12 +1307,12 @@
               ],
               "query": [
                 {
-                  "key": "limit",
+                  "key": "page_size",
                   "value": "101"
                 }
               ]
             },
-            "description": "El contrato define 1 ≤ limit ≤ 100."
+            "description": "El contrato define 1 ≤ page_size ≤ 100."
           },
           "event": [
             {
@@ -1323,7 +1337,7 @@
           ]
         },
         {
-          "name": "Cursor inválido → 422",
+          "name": "page=0 → 422",
           "request": {
             "method": "GET",
             "header": [
@@ -1333,7 +1347,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/alerts?cursor=esto-no-es-un-cursor",
+              "raw": "{{baseUrl}}/api/v1/alerts?page=0",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -1344,12 +1358,12 @@
               ],
               "query": [
                 {
-                  "key": "cursor",
-                  "value": "esto-no-es-un-cursor"
+                  "key": "page",
+                  "value": "0"
                 }
               ]
             },
-            "description": "Un cursor corrupto no debe devolver silenciosamente la primera página."
+            "description": "El contrato define page ≥ 1."
           },
           "event": [
             {
@@ -1794,7 +1808,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/alerts?limit=100",
+              "raw": "{{baseUrl}}/api/v1/alerts?page_size=100",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -1805,7 +1819,7 @@
               ],
               "query": [
                 {
-                  "key": "limit",
+                  "key": "page_size",
                   "value": "100"
                 }
               ]
@@ -1885,10 +1899,6 @@
     },
     {
       "key": "etagStale",
-      "value": ""
-    },
-    {
-      "key": "cursor",
       "value": ""
     },
     {
