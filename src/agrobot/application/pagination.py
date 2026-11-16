@@ -1,28 +1,44 @@
-"""Utilidades de paginación por cursor opaco (keyset pagination)."""
+"""Paginación por número de página (independiente de la base de datos)."""
 
 from __future__ import annotations
 
-import base64
-import uuid
-from datetime import datetime
-
-from agrobot.domain.errors import InvalidCursor
+from dataclasses import dataclass
+from math import ceil
 
 
-def encode_cursor(created_at: datetime, item_id: uuid.UUID) -> str:
-    """Genera un cursor opaco codificado en base64 para keyset pagination."""
-    raw = f"{created_at.isoformat()}_{item_id}"
-    return base64.urlsafe_b64encode(raw.encode()).decode()
+@dataclass(frozen=True)
+class PageParams:
+    page: int = 1
+    page_size: int = 10
+
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.page_size
 
 
-def decode_cursor(cursor_str: str) -> tuple[datetime, uuid.UUID]:
-    """Decodifica un cursor opaco.
+@dataclass(frozen=True)
+class PageMeta:
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
 
-    Lanza InvalidCursor si el cursor no tiene formato válido.
-    """
-    try:
-        raw = base64.urlsafe_b64decode(cursor_str.encode()).decode()
-        dt_str, id_str = raw.split("_", 1)
-        return datetime.fromisoformat(dt_str), uuid.UUID(id_str)
-    except Exception as exc:
-        raise InvalidCursor("Cursor de paginación inválido o corrupto") from exc
+    @classmethod
+    def build(cls, total: int, params: PageParams) -> PageMeta:
+        total_pages = ceil(total / params.page_size) if total > 0 else 0
+        return cls(
+            total=total,
+            page=params.page,
+            page_size=params.page_size,
+            total_pages=total_pages,
+            has_next=params.page < total_pages,
+            has_prev=params.page > 1,
+        )
+
+
+@dataclass(frozen=True)
+class Page[T]:
+    items: list[T]
+    meta: PageMeta

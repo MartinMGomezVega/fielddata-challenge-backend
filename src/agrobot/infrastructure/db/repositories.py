@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
-from agrobot.application.pagination import decode_cursor, encode_cursor
+from agrobot.application.pagination import Page, PageMeta, PageParams
 from agrobot.domain.entities import (
     Alert as AlertEntity,
 )
@@ -150,39 +150,33 @@ class SqlAlchemyAlertRepository:
         field_id: uuid.UUID | None = None,
         event_type: WeatherEvent | None = None,
         status: AlertStatus | None = None,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[AlertEntity], str | None]:
-        query = (
+        params: PageParams | None = None,
+    ) -> Page[AlertEntity]:
+        params = params or PageParams()
+        conditions = [AlertModel.user_id == user_id, AlertModel.deleted_at.is_(None)]
+        if field_id is not None:
+            conditions.append(AlertModel.field_id == field_id)
+        if event_type is not None:
+            conditions.append(AlertModel.event_type == event_type)
+        if status is not None:
+            conditions.append(AlertModel.status == status)
+
+        total = (
+            await self._session.scalar(
+                select(func.count()).select_from(AlertModel).where(*conditions)
+            )
+            or 0
+        )
+        result = await self._session.execute(
             select(AlertModel)
             .options(selectinload(AlertModel.field))
-            .where(
-                AlertModel.user_id == user_id,
-                AlertModel.deleted_at.is_(None),
-            )
+            .where(*conditions)
+            .order_by(AlertModel.created_at.desc(), AlertModel.id.desc())
+            .offset(params.offset)
+            .limit(params.page_size)
         )
-        if field_id is not None:
-            query = query.where(AlertModel.field_id == field_id)
-        if event_type is not None:
-            query = query.where(AlertModel.event_type == event_type)
-        if status is not None:
-            query = query.where(AlertModel.status == status)
-
-        if cursor is not None:
-            c_dt, c_id = decode_cursor(cursor)
-            query = query.where(tuple_(AlertModel.created_at, AlertModel.id) < tuple_(c_dt, c_id))
-
-        query = query.order_by(AlertModel.created_at.desc(), AlertModel.id.desc()).limit(limit + 1)
-        result = await self._session.execute(query)
-        models = list(result.scalars().all())
-
-        next_cursor = None
-        if len(models) > limit:
-            models = models[:limit]
-            last_item = models[-1]
-            next_cursor = encode_cursor(last_item.created_at, last_item.id)
-
-        return [to_alert_entity(m) for m in models], next_cursor
+        items = [to_alert_entity(m) for m in result.scalars().all()]
+        return Page(items=items, meta=PageMeta.build(total, params))
 
     async def update(self, alert: AlertEntity) -> AlertEntity:
         model = await self._session.get(AlertModel, alert.id)
@@ -254,8 +248,8 @@ class SqlAlchemyForecastRepository:
             where=stmt.excluded.issued_at > WeatherForecastModel.issued_at,
         )
         result = await self._session.execute(upsert_stmt)
-        cursor_result = cast(CursorResult[object], result)
-        return bool(cursor_result.rowcount and cursor_result.rowcount > 0)
+        c_res = cast(CursorResult[object], result)
+        return bool(c_res.rowcount and c_res.rowcount > 0)
 
     async def get_for_field(
         self,
@@ -368,46 +362,41 @@ class SqlAlchemyNotificationRepository:
             index_elements=["alert_id", "forecast_date", "episode"]
         )
         result = await self._session.execute(insert_stmt)
-        cursor_result = cast(CursorResult[object], result)
-        return bool(cursor_result.rowcount and cursor_result.rowcount > 0)
+        c_res = cast(CursorResult[object], result)
+        return bool(c_res.rowcount and c_res.rowcount > 0)
 
     async def get_by_alert(
         self,
         alert_id: uuid.UUID,
         user_id: uuid.UUID,
         *,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[NotificationEntity], str | None]:
+        params: PageParams | None = None,
+    ) -> Page[NotificationEntity]:
         # Bloque 4 Bug 6: No filtrar por deleted_at; historial sigue consultable
+        params = params or PageParams()
+        conditions = [
+            AlertNotificationModel.alert_id == alert_id,
+            AlertModel.user_id == user_id,
+        ]
+        total = (
+            await self._session.scalar(
+                select(func.count(AlertNotificationModel.id))
+                .join(AlertNotificationModel.alert)
+                .where(*conditions)
+            )
+            or 0
+        )
         query = (
             select(AlertNotificationModel)
             .join(AlertNotificationModel.alert)
-            .where(
-                AlertNotificationModel.alert_id == alert_id,
-                AlertModel.user_id == user_id,
-            )
+            .where(*conditions)
+            .order_by(AlertNotificationModel.created_at.desc(), AlertNotificationModel.id.desc())
+            .offset(params.offset)
+            .limit(params.page_size)
         )
-        if cursor is not None:
-            c_dt, c_id = decode_cursor(cursor)
-            query = query.where(
-                tuple_(AlertNotificationModel.created_at, AlertNotificationModel.id)
-                < tuple_(c_dt, c_id)
-            )
-
-        query = query.order_by(
-            AlertNotificationModel.created_at.desc(), AlertNotificationModel.id.desc()
-        ).limit(limit + 1)
         result = await self._session.execute(query)
-        models = list(result.scalars().all())
-
-        next_cursor = None
-        if len(models) > limit:
-            models = models[:limit]
-            last_item = models[-1]
-            next_cursor = encode_cursor(last_item.created_at, last_item.id)
-
-        return [to_notification_entity(m) for m in models], next_cursor
+        items = [to_notification_entity(m) for m in result.scalars().all()]
+        return Page(items=items, meta=PageMeta.build(total, params))
 
     async def list_by_user(
         self,
@@ -416,42 +405,37 @@ class SqlAlchemyNotificationRepository:
         status: NotificationStatus | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[NotificationEntity], str | None]:
+        params: PageParams | None = None,
+    ) -> Page[NotificationEntity]:
         # Bloque 4 Bug 6: La bandeja incluye avisos de alertas borradas
+        params = params or PageParams()
+        conditions = [AlertModel.user_id == user_id]
+        if status is not None:
+            conditions.append(AlertNotificationModel.status == status)
+        if from_date is not None:
+            conditions.append(AlertNotificationModel.forecast_date >= from_date)
+        if to_date is not None:
+            conditions.append(AlertNotificationModel.forecast_date <= to_date)
+
+        total = (
+            await self._session.scalar(
+                select(func.count(AlertNotificationModel.id))
+                .join(AlertNotificationModel.alert)
+                .where(*conditions)
+            )
+            or 0
+        )
         query = (
             select(AlertNotificationModel)
             .join(AlertNotificationModel.alert)
-            .where(AlertModel.user_id == user_id)
+            .where(*conditions)
+            .order_by(AlertNotificationModel.created_at.desc(), AlertNotificationModel.id.desc())
+            .offset(params.offset)
+            .limit(params.page_size)
         )
-        if status is not None:
-            query = query.where(AlertNotificationModel.status == status)
-        if from_date is not None:
-            query = query.where(AlertNotificationModel.forecast_date >= from_date)
-        if to_date is not None:
-            query = query.where(AlertNotificationModel.forecast_date <= to_date)
-
-        if cursor is not None:
-            c_dt, c_id = decode_cursor(cursor)
-            query = query.where(
-                tuple_(AlertNotificationModel.created_at, AlertNotificationModel.id)
-                < tuple_(c_dt, c_id)
-            )
-
-        query = query.order_by(
-            AlertNotificationModel.created_at.desc(), AlertNotificationModel.id.desc()
-        ).limit(limit + 1)
         result = await self._session.execute(query)
-        models = list(result.scalars().all())
-
-        next_cursor = None
-        if len(models) > limit:
-            models = models[:limit]
-            last_item = models[-1]
-            next_cursor = encode_cursor(last_item.created_at, last_item.id)
-
-        return [to_notification_entity(m) for m in models], next_cursor
+        items = [to_notification_entity(m) for m in result.scalars().all()]
+        return Page(items=items, meta=PageMeta.build(total, params))
 
     async def claim_pending(
         self, limit: int, lease_duration: timedelta, now: datetime
@@ -526,8 +510,8 @@ class SqlAlchemyNotificationRepository:
             )
         )
         result = await self._session.execute(stmt)
-        cursor_result = cast(CursorResult[object], result)
-        return int(cursor_result.rowcount or 0)
+        c_res = cast(CursorResult[object], result)
+        return int(c_res.rowcount or 0)
 
 
 class SqlAlchemyFieldRepository:

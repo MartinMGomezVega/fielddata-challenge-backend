@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import uuid
 from typing import Annotated, Any
@@ -16,6 +17,7 @@ from agrobot.api.schemas import (
     AlertPage,
     AlertResponse,
     AlertUpdate,
+    PageMetaResponse,
 )
 from agrobot.application.etag import format_etag
 from agrobot.application.use_cases.manage_alerts import (
@@ -89,7 +91,7 @@ async def create_alert(
     "",
     response_model=AlertPage,
     operation_id="listAlerts",
-    summary="Listar mis alertas (paginado por cursor)",
+    summary="Listar mis alertas (paginado)",
 )
 async def list_alerts(
     user_id: Annotated[uuid.UUID, Depends(get_current_user_id)],
@@ -97,19 +99,22 @@ async def list_alerts(
     field_id: uuid.UUID | None = None,
     event_type: WeatherEvent | None = None,
     status: Annotated[AlertStatus | None, Query(alias="status")] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    cursor: str | None = None,
+    page: Annotated[int, Query(ge=1, description="Número de página (empieza en 1)")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100, description="Elementos por página")] = 10,
 ) -> AlertPage:
-    alerts, next_cursor = await service.list_alerts(
+    page_result = await service.list_alerts(
         user_id=user_id,
         field_id=field_id,
         event_type=event_type,
         status=status,
-        limit=limit,
-        cursor=cursor,
+        page=page,
+        page_size=page_size,
     )
-    items = [AlertResponse.model_validate(a) for a in alerts]
-    return AlertPage(items=items, next_cursor=next_cursor)
+    items = [AlertResponse.model_validate(a) for a in page_result.items]
+    return AlertPage(
+        items=items,
+        meta=PageMetaResponse(**dataclasses.asdict(page_result.meta)),
+    )
 
 
 @router.get(

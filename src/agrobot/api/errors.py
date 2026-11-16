@@ -10,7 +10,6 @@ from agrobot.domain.errors import (
     DuplicateAlert,
     FieldNotFound,
     IdempotencyConflict,
-    InvalidCursor,
     InvalidThreshold,
     VersionConflict,
 )
@@ -91,16 +90,6 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(InvalidThreshold)
     async def invalid_threshold_handler(request: Request, exc: InvalidThreshold) -> JSONResponse:
-        return make_problem_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            problem_type="https://agrobot.dev/problems/validation-error",
-            title="Validation Error",
-            detail=exc.message,
-            instance=str(request.url.path),
-        )
-
-    @app.exception_handler(InvalidCursor)
-    async def invalid_cursor_handler(request: Request, exc: InvalidCursor) -> JSONResponse:
         return make_problem_response(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             problem_type="https://agrobot.dev/problems/validation-error",

@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from agrobot.application.etag import parse_etag
+from agrobot.application.pagination import Page, PageParams
 from agrobot.application.ports import Clock, UnitOfWork
 from agrobot.domain.entities import Alert, IdempotencyRecord
 from agrobot.domain.enums import AlertStatus, WeatherEvent
@@ -247,18 +248,18 @@ class ManageAlerts:
         field_id: uuid.UUID | None = None,
         event_type: WeatherEvent | None = None,
         status: AlertStatus | None = None,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[Alert], str | None]:
-        """Lista alertas del usuario con filtros y paginación por cursor."""
+        page: int = 1,
+        page_size: int = 10,
+    ) -> Page[Alert]:
+        """Lista alertas del usuario con filtros y paginación por número de página."""
+        params = PageParams(page=page, page_size=page_size)
         async with self._uow as uow:
             return await uow.alerts.list_by_user(
                 user_id,
                 field_id=field_id,
                 event_type=event_type,
                 status=status,
-                limit=limit,
-                cursor=cursor,
+                params=params,
             )
 
     async def update_alert(self, dto: UpdateAlertDTO) -> Alert:

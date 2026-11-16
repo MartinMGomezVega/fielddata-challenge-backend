@@ -57,13 +57,13 @@ paths:
     get:
       tags: [Alerts]
       operationId: listAlerts
-      summary: Listar mis alertas (paginado por cursor)
+      summary: Listar mis alertas (paginado)
       parameters:
         - { name: field_id, in: query, schema: { type: string, format: uuid } }
         - { name: event_type, in: query, schema: { $ref: "#/components/schemas/WeatherEvent" } }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/AlertStatus" } }
-        - $ref: "#/components/parameters/Limit"
-        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: OK
@@ -133,8 +133,8 @@ paths:
       operationId: listAlertNotifications
       summary: Historial de notificaciones de una alerta
       parameters:
-        - $ref: "#/components/parameters/Limit"
-        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: OK
@@ -152,8 +152,8 @@ paths:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/NotificationStatus" } }
         - { name: from_date, in: query, schema: { type: string, format: date }, description: "forecast_date >=" }
         - { name: to_date, in: query, schema: { type: string, format: date }, description: "forecast_date <=" }
-        - $ref: "#/components/parameters/Limit"
-        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: OK
@@ -218,15 +218,14 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
-    Limit:
-      name: limit
+    Page:
+      name: page
       in: query
-      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
-    Cursor:
-      name: cursor
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
       in: query
-      description: Cursor opaco devuelto en `next_cursor` (keyset pagination).
-      schema: { type: string }
+      schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -289,10 +288,21 @@ components:
 
     AlertPage:
       type: object
-      required: [items]
+      required: [items, meta]
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/Alert" } }
-        next_cursor: { type: [string, "null"] }
+        meta: { $ref: "#/components/schemas/PageMeta" }
+
+    PageMeta:
+      type: object
+      required: [total, page, page_size, total_pages, has_next, has_prev]
+      properties:
+        total: { type: integer, minimum: 0 }
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total_pages: { type: integer, minimum: 0 }
+        has_next: { type: boolean }
+        has_prev: { type: boolean }
 
     Notification:
       type: object
@@ -316,10 +326,10 @@ components:
 
     NotificationPage:
       type: object
-      required: [items]
+      required: [items, meta]
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
-        next_cursor: { type: [string, "null"] }
+        meta: { $ref: "#/components/schemas/PageMeta" }
 
     Forecast:
       type: object

@@ -125,13 +125,20 @@ async def test_list_notifications_inbox(
     client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
 ) -> None:
     headers = {"X-User-Id": str(setup_data["user_id"])}
-    r = await client.get("/api/v1/notifications", headers=headers)
+    r = await client.get("/api/v1/notifications?page=1&page_size=5", headers=headers)
     assert r.status_code == 200
     data = r.json()
     assert "items" in data
+    assert "meta" in data
     assert len(data["items"]) == 1
     assert data["items"][0]["event_type"] == "frost"
     assert data["items"][0]["probability"] == 75.0
+    assert data["meta"]["total"] == 1
+    assert data["meta"]["page"] == 1
+    assert data["meta"]["page_size"] == 5
+    assert data["meta"]["total_pages"] == 1
+    assert data["meta"]["has_next"] is False
+    assert data["meta"]["has_prev"] is False
 
 
 async def test_list_alert_notifications_history(
@@ -143,6 +150,8 @@ async def test_list_alert_notifications_history(
     assert r.status_code == 200
     data = r.json()
     assert len(data["items"]) == 1
+    assert "meta" in data
+    assert data["meta"]["total"] == 1
 
 
 async def test_list_field_forecasts(

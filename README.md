@@ -52,7 +52,7 @@ El contrato está en [`docs/openapi.yaml`](docs/openapi.yaml), y un test automat
 | Método | Ruta | Descripción |
 |---|---|---|
 | `POST` | `/api/v1/alerts` | Crear alerta (acepta `Idempotency-Key`) |
-| `GET` | `/api/v1/alerts` | Listar mis alertas: filtros por campo, evento y estado; paginación por cursor |
+| `GET` | `/api/v1/alerts` | Listar mis alertas: filtros por campo, evento y estado; paginación por página (`page`, `page_size`) |
 | `GET` · `PATCH` · `DELETE` | `/api/v1/alerts/{id}` | Detalle · cambiar umbral o pausar (`If-Match`) · borrado lógico |
 | `GET` | `/api/v1/alerts/{id}/notifications` | Historial de avisos de una alerta |
 | `GET` | `/api/v1/notifications` | Bandeja de notificaciones del usuario |

@@ -243,7 +243,7 @@ scheduler.add_job(
 - `Idempotency-Key` opcional en POST (tabla `idempotency_keys`, TTL 24 h) — reintentos de red desde WhatsApp.
 - PATCH con `If-Match` (ETag = `version`) → 412 si cambió.
 - DELETE idempotente (204 siempre).
-- Paginación por cursor (keyset `(created_at, id)`), no OFFSET: estable y O(1) por página.
+- Paginación por página (`page`, `page_size`) con metadatos (`total`, `page`, `page_size`, `total_pages`, `has_next`, `has_prev`).
 
 ## 6. Riesgos y extensiones
 | Tema | Decisión hoy | Extensión |
@@ -309,5 +309,9 @@ Durante la construcción de las fases 1 a 6 se tomaron las siguientes decisiones
 
 11. **Estandarización global de respuestas de error RFC 9457 (`application/problem+json`)**:
     - Todos los errores HTTP (errores de validación 422, encabezados faltantes, errores de negocio 404/409/412 y excepciones 500 no controladas) se serializan bajo la especificación RFC 9457 con `type`, `title`, `status`, `detail`, e `instance`.
+
+12. **Paginación por página en lugar de cursor**:
+    - El cliente necesita total y número de página para mostrarlos.
+    - Trade-off aceptado: OFFSET es más costoso en páginas profundas y puede correr resultados si se insertan filas mientras se pagina; los listados son por usuario y chicos, así que no impacta. Si crecen, se vuelve a keyset.
 
 

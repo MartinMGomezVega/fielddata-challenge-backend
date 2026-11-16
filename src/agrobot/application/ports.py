@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
+from agrobot.application.pagination import Page, PageParams
 from agrobot.domain.entities import (
     Alert,
     BreachState,
@@ -54,9 +55,8 @@ class AlertRepository(Protocol):
         field_id: uuid.UUID | None = None,
         event_type: WeatherEvent | None = None,
         status: AlertStatus | None = None,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[Alert], str | None]: ...
+        params: PageParams | None = None,
+    ) -> Page[Alert]: ...
 
     async def update(self, alert: Alert) -> Alert: ...
 
@@ -114,9 +114,8 @@ class NotificationRepository(Protocol):
         alert_id: uuid.UUID,
         user_id: uuid.UUID,
         *,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[Notification], str | None]: ...
+        params: PageParams | None = None,
+    ) -> Page[Notification]: ...
 
     async def list_by_user(
         self,
@@ -125,9 +124,8 @@ class NotificationRepository(Protocol):
         status: NotificationStatus | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[Notification], str | None]: ...
+        params: PageParams | None = None,
+    ) -> Page[Notification]: ...
 
     async def claim_pending(
         self, limit: int, lease_duration: timedelta, now: datetime

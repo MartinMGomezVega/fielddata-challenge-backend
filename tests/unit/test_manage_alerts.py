@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 
+from agrobot.application.pagination import Page, PageMeta, PageParams
 from agrobot.application.ports import (
     AlertRepository,
     BreachStateRepository,
@@ -89,10 +90,9 @@ class FakeAlertRepository:
         field_id: uuid.UUID | None = None,
         event_type: WeatherEvent | None = None,
         status: AlertStatus | None = None,
-        limit: int = 20,
-        cursor: str | None = None,
-    ) -> tuple[list[Alert], str | None]:
-        _ = cursor
+        params: PageParams | None = None,
+    ) -> Page[Alert]:
+        params = params or PageParams()
         user_alerts = [
             a for a in self.alerts.values() if a.user_id == user_id and a.deleted_at is None
         ]
@@ -102,8 +102,16 @@ class FakeAlertRepository:
             user_alerts = [a for a in user_alerts if a.event_type == event_type]
         if status:
             user_alerts = [a for a in user_alerts if a.status == status]
-        user_alerts.sort(key=lambda a: (a.created_at, a.id), reverse=True)
-        return user_alerts[:limit], None
+        user_alerts.sort(
+            key=lambda a: (
+                a.created_at if a.created_at is not None else datetime.min.replace(tzinfo=UTC),
+                a.id,
+            ),
+            reverse=True,
+        )
+        total = len(user_alerts)
+        paginated_items = user_alerts[params.offset : params.offset + params.page_size]
+        return Page(items=paginated_items, meta=PageMeta.build(total, params))
 
     async def update(self, alert: Alert) -> Alert:
         self.alerts[alert.id] = alert
@@ -362,7 +370,7 @@ async def test_delete_alert_idempotent(
     await service.delete_alert(alert.id, user_id)
 
 
-async def test_list_alerts_and_cursor_pagination(
+async def test_list_alerts_and_pagination(
     fake_context: tuple[ManageAlerts, FakeAlertRepository, FakeFieldRepository, Clock],
 ) -> None:
     service, _, field_repo, clock = fake_context
@@ -383,8 +391,17 @@ async def test_list_alerts_and_cursor_pagination(
             CreateAlertDTO(user_id, field_id, WeatherEvent.FROST, Decimal(f"{50 + i}.00"))
         )
 
-    alerts, cursor = await service.list_alerts(user_id, limit=3)
-    assert len(alerts) == 3
+    page1 = await service.list_alerts(user_id, page=1, page_size=3)
+    assert len(page1.items) == 3
+    assert page1.meta.total == 5
+    assert page1.meta.total_pages == 2
+    assert page1.meta.has_next is True
+    assert page1.meta.has_prev is False
+
+    page2 = await service.list_alerts(user_id, page=2, page_size=3)
+    assert len(page2.items) == 2
+    assert page2.meta.has_next is False
+    assert page2.meta.has_prev is True
 
 
 async def test_update_alert_status(

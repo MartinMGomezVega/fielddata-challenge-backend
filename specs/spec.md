@@ -30,7 +30,7 @@ importa (helada, lluvia, granizo…) supera un nivel de riesgo que ellos mismos 
 - RF-02 Sólo puede crear alertas sobre **sus** campos; un campo ajeno se comporta como inexistente (404).
 - RF-03 No pueden existir dos alertas vivas idénticas (mismo campo + evento + umbral) → 409.
   Sí se permiten varios umbrales para el mismo evento (ej. 50 = "atención", 80 = "crítico").
-- RF-04 Lista sus alertas con filtros (campo, evento, estado) y paginación por cursor.
+- RF-04 Lista sus alertas con filtros (campo, evento, estado) y paginación por página (`page`, `page_size`).
 - RF-05 Modifica el umbral o pausa/reactiva una alerta. Campo y evento son inmutables.
 - RF-06 Elimina una alerta (borrado lógico; el historial se conserva). Operación idempotente.
 - RF-07 Consulta el historial de notificaciones de una alerta y su bandeja general.

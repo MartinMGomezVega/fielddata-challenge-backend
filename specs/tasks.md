@@ -29,7 +29,7 @@ Orden pensado para que cada fase deje algo verde y commiteable. `[x]` = hecho en
 
 ## Fase 5 — API
 - [x] Schemas Pydantic + routers según `openapi.yaml`
-- [x] Handlers problem+json, `X-User-Id`, ETag/If-Match, cursor pagination
+- [x] Handlers problem+json, `X-User-Id`, ETag/If-Match, pagination by page/page_size
 - [x] `Idempotency-Key` en POST /alerts (tabla `idempotency_keys`, TTL 24 h; misma key + body distinto → 422)
 - [x] Health `live` / `ready`
 - [x] Tests API: AC-14, AC-15, AC-16 + test de contrato (openapi generado vs `docs/openapi.yaml`)

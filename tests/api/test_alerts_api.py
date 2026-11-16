@@ -458,25 +458,78 @@ async def test_list_alerts_filter_by_status(
     assert id1 not in active_ids
 
 
-async def test_list_alerts_limit_and_cursor_validation(
+async def test_list_alerts_pagination_and_validation(
     client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
 ) -> None:
-    """Bloque 4 Bug 4: limit inválido (0, -1, 101) o cursor inválido devuelven 422 RFC 9457."""
+    """Paginación por número de página y validaciones de rango."""
     headers = {"X-User-Id": str(setup_data["user_id"])}
 
-    for invalid_limit in (0, -5, 101):
-        r = await client.get(f"/api/v1/alerts?limit={invalid_limit}", headers=headers)
-        assert r.status_code == 422
-        assert r.headers["content-type"] == "application/problem+json"
+    # Crear 12 alertas para un usuario con umbrales distintos
+    created_ids: list[str] = []
+    for i in range(12):
+        r = await client.post(
+            "/api/v1/alerts",
+            json={
+                "field_id": str(setup_data["field_id"]),
+                "event_type": "frost",
+                "threshold": float(10 + i),
+            },
+            headers=headers,
+        )
+        assert r.status_code == 201
+        created_ids.append(r.json()["id"])
 
-        r_notif = await client.get(f"/api/v1/notifications?limit={invalid_limit}", headers=headers)
-        assert r_notif.status_code == 422
-        assert r_notif.headers["content-type"] == "application/problem+json"
+    # GET ?page=1 -> 10 items, meta.total == 12, total_pages == 2, has_next True, has_prev False
+    r_p1 = await client.get("/api/v1/alerts?page=1", headers=headers)
+    assert r_p1.status_code == 200
+    data_p1 = r_p1.json()
+    assert len(data_p1["items"]) == 10
+    assert data_p1["meta"]["total"] == 12
+    assert data_p1["meta"]["page"] == 1
+    assert data_p1["meta"]["page_size"] == 10
+    assert data_p1["meta"]["total_pages"] == 2
+    assert data_p1["meta"]["has_next"] is True
+    assert data_p1["meta"]["has_prev"] is False
 
-    # Cursor inválido
-    r_cursor = await client.get("/api/v1/alerts?cursor=invalid_base64_garbage", headers=headers)
-    assert r_cursor.status_code == 422
-    assert r_cursor.headers["content-type"] == "application/problem+json"
+    # El orden es del más nuevo al más viejo (created_at DESC, id DESC)
+    p1_ids = [a["id"] for a in data_p1["items"]]
+    assert p1_ids == list(reversed(created_ids[-10:]))
+
+    # GET ?page=2 -> 2 items, has_next False, has_prev True; ningún id repetido
+    r_p2 = await client.get("/api/v1/alerts?page=2", headers=headers)
+    assert r_p2.status_code == 200
+    data_p2 = r_p2.json()
+    assert len(data_p2["items"]) == 2
+    assert data_p2["meta"]["total"] == 12
+    assert data_p2["meta"]["page"] == 2
+    assert data_p2["meta"]["has_next"] is False
+    assert data_p2["meta"]["has_prev"] is True
+    p2_ids = [a["id"] for a in data_p2["items"]]
+    assert set(p1_ids).isdisjoint(set(p2_ids))
+
+    # GET ?page=3 -> 200, items == [], meta.total == 12
+    r_p3 = await client.get("/api/v1/alerts?page=3", headers=headers)
+    assert r_p3.status_code == 200
+    data_p3 = r_p3.json()
+    assert data_p3["items"] == []
+    assert data_p3["meta"]["total"] == 12
+    assert data_p3["meta"]["page"] == 3
+    assert data_p3["meta"]["total_pages"] == 2
+    assert data_p3["meta"]["has_next"] is False
+    assert data_p3["meta"]["has_prev"] is True
+
+    # GET ?page_size=5 -> 5 items, total_pages == 3
+    r_s5 = await client.get("/api/v1/alerts?page_size=5", headers=headers)
+    assert r_s5.status_code == 200
+    data_s5 = r_s5.json()
+    assert len(data_s5["items"]) == 5
+    assert data_s5["meta"]["total_pages"] == 3
+
+    # ?page=0, ?page_size=0 y ?page_size=101 -> 422 con application/problem+json
+    for query_param in ("page=0", "page_size=0", "page_size=101"):
+        r_err = await client.get(f"/api/v1/alerts?{query_param}", headers=headers)
+        assert r_err.status_code == 422
+        assert r_err.headers["content-type"] == "application/problem+json"
 
 
 async def test_concurrent_posts_and_idempotency_race(

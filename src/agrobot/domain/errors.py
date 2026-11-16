@@ -39,7 +39,3 @@ class InvalidTimezone(DomainError):
 
 class IdempotencyConflict(DomainError):
     """Misma Idempotency-Key pero con un cuerpo de solicitud diferente (422)."""
-
-
-class InvalidCursor(DomainError):
-    """El cursor de paginación es inválido o está malformado."""

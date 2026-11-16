@@ -80,9 +80,18 @@ class AlertResponse(BaseModel):
     updated_at: datetime
 
 
+class PageMetaResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
+
+
 class AlertPage(BaseModel):
     items: list[AlertResponse]
-    next_cursor: str | None = None
+    meta: PageMetaResponse
 
 
 class NotificationResponse(BaseModel):
@@ -104,7 +113,7 @@ class NotificationResponse(BaseModel):
 
 class NotificationPage(BaseModel):
     items: list[NotificationResponse]
-    next_cursor: str | None = None
+    meta: PageMetaResponse
 
 
 class ForecastResponse(BaseModel):

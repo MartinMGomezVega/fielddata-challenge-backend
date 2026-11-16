@@ -6,31 +6,50 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
-
-from agrobot.application.pagination import decode_cursor, encode_cursor
+from agrobot.application.pagination import PageMeta, PageParams
 from agrobot.domain.entities import Alert, Field, Forecast
 from agrobot.domain.enums import AlertStatus, WeatherEvent
-from agrobot.domain.errors import InvalidCursor
 
 
-def test_encode_and_decode_cursor_roundtrip() -> None:
-    item_id = uuid.uuid4()
-    now = datetime(2026, 5, 10, 14, 30, 0, tzinfo=UTC)
-    cursor = encode_cursor(now, item_id)
-    assert isinstance(cursor, str)
-
-    decoded_dt, decoded_id = decode_cursor(cursor)
-    assert decoded_dt == now
-    assert decoded_id == item_id
+def test_page_params_offset() -> None:
+    params = PageParams(page=3, page_size=10)
+    assert params.offset == 20
 
 
-def test_decode_cursor_invalid_format() -> None:
-    with pytest.raises(InvalidCursor):
-        decode_cursor("not-a-valid-base64-string!!")
+def test_page_meta_build() -> None:
+    # total=0, page=1, size=10 -> total_pages=0, has_next=False, has_prev=False
+    meta_zero = PageMeta.build(total=0, params=PageParams(page=1, page_size=10))
+    assert meta_zero.total == 0
+    assert meta_zero.page == 1
+    assert meta_zero.page_size == 10
+    assert meta_zero.total_pages == 0
+    assert meta_zero.has_next is False
+    assert meta_zero.has_prev is False
 
-    with pytest.raises(InvalidCursor):
-        decode_cursor("invalid_cursor")
+    # total=25, page=1, size=10 -> total_pages=3, has_next=True, has_prev=False
+    meta_p1 = PageMeta.build(total=25, params=PageParams(page=1, page_size=10))
+    assert meta_p1.total == 25
+    assert meta_p1.page == 1
+    assert meta_p1.page_size == 10
+    assert meta_p1.total_pages == 3
+    assert meta_p1.has_next is True
+    assert meta_p1.has_prev is False
+
+    # total=25, page=3, size=10 -> has_next=False, has_prev=True
+    meta_p3 = PageMeta.build(total=25, params=PageParams(page=3, page_size=10))
+    assert meta_p3.total == 25
+    assert meta_p3.page == 3
+    assert meta_p3.total_pages == 3
+    assert meta_p3.has_next is False
+    assert meta_p3.has_prev is True
+
+    # total=25, page=5, size=10 -> total_pages=3, has_next=False, has_prev=True
+    meta_p5 = PageMeta.build(total=25, params=PageParams(page=5, page_size=10))
+    assert meta_p5.total == 25
+    assert meta_p5.page == 5
+    assert meta_p5.total_pages == 3
+    assert meta_p5.has_next is False
+    assert meta_p5.has_prev is True
 
 
 def test_alert_is_active_property() -> None:
