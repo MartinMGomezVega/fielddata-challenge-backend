@@ -1,0 +1,1894 @@
+{
+  "info": {
+    "_postman_id": "994f1009-2d9c-5e5c-b1e3-7480b0f42a5e",
+    "name": "Agrobot — Alertas Climáticas",
+    "description": "Colección para probar la API de alertas climáticas de punta a punta.\n\n**Antes de correrla**\n1. `docker compose up --build -d`\n2. `make seed-docker` (carga usuarios, campos, alertas y pronósticos con casos de borde)\n3. Esperá a que el worker evalúe (`docker compose logs -f worker`, evento `evaluate_alerts_finished`) y despache (`notification_sent_success`).\n4. Importá también el environment `agrobot.local.postman_environment.json` y seleccionalo.\n\n**Orden:** las carpetas se ejecutan en orden (Collection Runner). La 1 crea una alerta y la 4 la borra, así que se puede correr muchas veces sin ensuciar la base.\n\n**Por línea de comando:** `make postman` (Newman en Docker, sin instalar nada).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0. Health",
+      "description": "Liveness y readiness. Si `ready` no da 200, la base no está accesible: no sigas.",
+      "item": [
+        {
+          "name": "Liveness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/live",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "live"
+              ]
+            },
+            "description": "El proceso responde."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Readiness (DB)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/ready",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "ready"
+              ]
+            },
+            "description": "La API puede consultar PostgreSQL (`SELECT 1`)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"status = ready\", () => pm.expect(pm.response.json().status).to.eql(\"ready\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Alertas — flujo completo",
+      "description": "Crea una alerta de granizo ≥ 50 % sobre el campo de Córdoba del usuario A, prueba idempotencia, concurrencia optimista (ETag/If-Match), pausa, filtros y paginación. La carpeta 4 la borra al final, así la colección se puede correr muchas veces.",
+      "item": [
+        {
+          "name": "Crear alerta (Idempotency-Key)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "Genera una Idempotency-Key nueva por corrida y crea la alerta. Guarda `alertId` y `etag`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"hail\",\n  \"threshold\": 50\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"idemKey\", pm.variables.replaceIn(\"{{$guid}}\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", () => pm.response.to.have.status(201));",
+                  "",
+                  "const b = pm.response.json();",
+                  "pm.test(\"Devuelve la alerta creada\", () => {",
+                  "    pm.expect(b.field_id).to.eql(pm.environment.get(\"fieldCordoba\"));",
+                  "    pm.expect(b.event_type).to.eql(\"hail\");",
+                  "    pm.expect(Number(b.threshold)).to.eql(50);",
+                  "    pm.expect(b.status).to.eql(\"active\");",
+                  "});",
+                  "pm.test(\"Header Location apunta al recurso\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Location\")).to.eql(\"/api/v1/alerts/\" + b.id);",
+                  "});",
+                  "pm.test(\"ETag inicial W/\\\"1\\\"\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.eql('W/\"1\"'));",
+                  "pm.collectionVariables.set(\"alertId\", b.id);",
+                  "pm.collectionVariables.set(\"etag\", pm.response.headers.get(\"ETag\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reintento con la misma key y mismo body → misma respuesta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "Simula un reintento de red. No debe crear otra alerta: devuelve la respuesta guardada.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"hail\",\n  \"threshold\": 50\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", () => pm.response.to.have.status(201));",
+                  "",
+                  "pm.test(\"Mismo id que la creación original\", () => {",
+                  "    pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get(\"alertId\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Misma key con otro body → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "Reusar la key con un payload distinto es un error del cliente.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"hail\",\n  \"threshold\": 70\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Obtener alerta",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Devuelve la alerta y su ETag."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test(\"Es la alerta creada\", () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get(\"alertId\")));",
+                  "pm.test(\"Trae ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.eql(pm.collectionVariables.get(\"etag\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Listar con filtros (campo + evento)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?field_id={{fieldCordoba}}&event_type=hail",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "field_id",
+                  "value": "{{fieldCordoba}}"
+                },
+                {
+                  "key": "event_type",
+                  "value": "hail"
+                }
+              ]
+            },
+            "description": "Filtra las alertas del usuario por campo y evento."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const items = pm.response.json().items;",
+                  "pm.test(\"Incluye la alerta creada\", () => pm.expect(items.map(a => a.id)).to.include(pm.collectionVariables.get(\"alertId\")));",
+                  "pm.test(\"Sólo eventos hail\", () => items.forEach(a => pm.expect(a.event_type).to.eql(\"hail\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Modificar umbral con If-Match correcto",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{etag}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Concurrencia optimista: con el ETag vigente la actualización pasa y la versión sube.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threshold\": 55\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test(\"Umbral actualizado\", () => pm.expect(Number(pm.response.json().threshold)).to.eql(55));",
+                  "pm.test(\"ETag pasa a W/\\\"2\\\"\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.eql('W/\"2\"'));",
+                  "pm.collectionVariables.set(\"etagStale\", pm.collectionVariables.get(\"etag\"));",
+                  "pm.collectionVariables.set(\"etag\", pm.response.headers.get(\"ETag\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Modificar con If-Match viejo → 412",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{etagStale}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Otro cliente ya modificó la alerta: la escritura se rechaza para no pisar cambios.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threshold\": 65\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 412\", () => pm.response.to.have.status(412));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pausar alerta",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{etag}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Una alerta pausada deja de evaluarse.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"paused\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test(\"Quedó pausada\", () => pm.expect(pm.response.json().status).to.eql(\"paused\"));",
+                  "pm.collectionVariables.set(\"etag\", pm.response.headers.get(\"ETag\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Filtrar por status=paused",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?status=paused",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "paused"
+                }
+              ]
+            },
+            "description": "El filtro `status` del contrato tiene que aplicarse (no ignorarse)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const items = pm.response.json().items;",
+                  "pm.test(\"Incluye la alerta pausada\", () => pm.expect(items.map(a => a.id)).to.include(pm.collectionVariables.get(\"alertId\")));",
+                  "pm.test(\"Todas están pausadas\", () => items.forEach(a => pm.expect(a.status).to.eql(\"paused\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Paginación: primera página (limit=1)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?limit=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "El usuario A tiene 4 alertas (3 del seed + la creada): con limit=1 tiene que haber cursor."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const b = pm.response.json();",
+                  "pm.test(\"Devuelve 1 item\", () => pm.expect(b.items).to.have.length(1));",
+                  "pm.test(\"Devuelve next_cursor\", () => pm.expect(b.next_cursor).to.be.a(\"string\").and.not.empty);",
+                  "pm.collectionVariables.set(\"cursor\", b.next_cursor);",
+                  "pm.collectionVariables.set(\"firstPageId\", b.items[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Paginación: segunda página",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?limit=1&cursor={{cursor}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "1"
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}"
+                }
+              ]
+            },
+            "description": "El cursor trae el siguiente elemento, sin repetir."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const b = pm.response.json();",
+                  "pm.test(\"Devuelve 1 item distinto al de la primera página\", () => {",
+                  "    pm.expect(b.items).to.have.length(1);",
+                  "    pm.expect(b.items[0].id).to.not.eql(pm.collectionVariables.get(\"firstPageId\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Validaciones y errores",
+      "description": "Casos de borde del contrato. Todos los errores deben responder application/problem+json.",
+      "item": [
+        {
+          "name": "Campo de otro usuario → 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "El campo de Tokio es del usuario B. Para A debe ser indistinguible de uno inexistente.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldTokyo}}\",\n  \"event_type\": \"frost\",\n  \"threshold\": 60\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 404\", () => pm.response.to.have.status(404));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alerta duplicada → 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "El seed ya creó frost ≥ 60 en Córdoba: no puede haber dos reglas vivas idénticas.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"frost\",\n  \"threshold\": 60\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 409\", () => pm.response.to.have.status(409));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Umbral 0 → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "Umbral 0 dispararía siempre: no se permite.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"frost\",\n  \"threshold\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Umbral 101 → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "La probabilidad es 0-100.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"frost\",\n  \"threshold\": 101\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Evento inexistente → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "Sólo rain, frost, hail, strong_wind, heat_wave.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"tornado\",\n  \"threshold\": 50\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Campo extra en el body → 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "additionalProperties: false. Evita, por ejemplo, que un cliente intente asignar la alerta a otro usuario.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"field_id\": \"{{fieldCordoba}}\",\n  \"event_type\": \"rain\",\n  \"threshold\": 50,\n  \"user_id\": \"{{userB}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH sin campos → 422",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{seedAlertFrost60}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{seedAlertFrost60}}"
+              ]
+            },
+            "description": "El contrato exige al menos una propiedad (minProperties: 1).",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alerta de otro usuario → 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userB}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{seedAlertFrost60}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{seedAlertFrost60}}"
+              ]
+            },
+            "description": "La alerta frost ≥ 60 del seed es del usuario A; para B no existe."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 404\", () => pm.response.to.have.status(404));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "X-User-Id inválido → 422",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "no-es-un-uuid"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "El header de identidad tiene que ser un UUID."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sin X-User-Id → 422",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ]
+            },
+            "description": "Sin identidad no se puede operar."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "limit=0 → 422",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?limit=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "El contrato define 1 ≤ limit ≤ 100."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "limit=101 → 422",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?limit=101",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "101"
+                }
+              ]
+            },
+            "description": "El contrato define 1 ≤ limit ≤ 100."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cursor inválido → 422",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?cursor=esto-no-es-un-cursor",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "cursor",
+                  "value": "esto-no-es-un-cursor"
+                }
+              ]
+            },
+            "description": "Un cursor corrupto no debe devolver silenciosamente la primera página."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 422\", () => pm.response.to.have.status(422));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Pronósticos y notificaciones (resultado del worker)",
+      "description": "Verifica lo que generó el worker a partir del seed. Requiere que el evaluador haya corrido al menos una vez después del seed (ver logs: `evaluate_alerts_finished`). Resultado esperado para el usuario A: frost ≥ 60 dispara por 60.00 (borde inclusivo), rain ≥ 50 y rain ≥ 80 disparan por 85.00 (dos umbrales sobre el mismo evento), 59.99 no dispara, el pronóstico de ayer y el stale se ignoran.",
+      "item": [
+        {
+          "name": "Pronóstico del campo de Córdoba",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/fields/{{fieldCordoba}}/forecasts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "fields",
+                "{{fieldCordoba}}",
+                "forecasts"
+              ]
+            },
+            "description": "Datos cargados por el seed (mock del job de ingesta)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const f = pm.response.json();",
+                  "pm.test(\"Hay pronósticos\", () => pm.expect(f.length).to.be.above(0));",
+                  "pm.test(\"Incluye el borde exacto frost 60.00\", () => {",
+                  "    pm.expect(f.some(x => x.event_type === \"frost\" && Number(x.probability) === 60)).to.be.true;",
+                  "});",
+                  "pm.test(\"Cada pronóstico trae issued_at\", () => f.forEach(x => pm.expect(x).to.have.property(\"issued_at\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pronóstico de un campo ajeno → 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/fields/{{fieldTokyo}}/forecasts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "fields",
+                "{{fieldTokyo}}",
+                "forecasts"
+              ]
+            },
+            "description": "El campo de Tokio es del usuario B."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 404\", () => pm.response.to.have.status(404));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bandeja del usuario A",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/notifications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications"
+              ]
+            },
+            "description": "Notificaciones generadas por el evaluador para las alertas del seed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const items = pm.response.json().items;",
+                  "const byAlert = id => items.filter(n => n.alert_id === pm.environment.get(id));",
+                  "pm.test(\"El evaluador ya corrió (hay notificaciones)\", () => {",
+                  "    pm.expect(items.length, \"Bandeja vacía: esperá a que corra el evaluador y volvé a ejecutar\").to.be.above(0);",
+                  "});",
+                  "pm.test(\"frost ≥ 60 disparó con 60.00 (borde inclusivo), episodio 1\", () => {",
+                  "    const n = byAlert(\"seedAlertFrost60\");",
+                  "    pm.expect(n).to.have.length(1);",
+                  "    pm.expect(Number(n[0].probability)).to.eql(60);",
+                  "    pm.expect(n[0].episode).to.eql(1);",
+                  "});",
+                  "pm.test(\"rain ≥ 50 y rain ≥ 80 dispararon por el mismo 85.00 (una por alerta)\", () => {",
+                  "    pm.expect(byAlert(\"seedAlertRain50\")).to.have.length(1);",
+                  "    pm.expect(byAlert(\"seedAlertRain80\")).to.have.length(1);",
+                  "});",
+                  "pm.test(\"Ninguna notificación por 59.99, fechas pasadas ni datos stale\", () => {",
+                  "    items.forEach(n => pm.expect(Number(n.probability)).to.be.at.least(Number(n.threshold)));",
+                  "    pm.expect(items.some(n => n.event_type === \"strong_wind\")).to.be.false;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bandeja filtrada por status=sent",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/notifications?status=sent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "sent"
+                }
+              ]
+            },
+            "description": "Después de que corre el dispatcher (cada 30 s), las notificaciones pasan a `sent`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const items = pm.response.json().items;",
+                  "pm.test(\"Hay notificaciones enviadas\", () => pm.expect(items.length, \"Todavía no corrió el dispatcher\").to.be.above(0));",
+                  "pm.test(\"Todas en sent con sent_at\", () => items.forEach(n => {",
+                  "    pm.expect(n.status).to.eql(\"sent\");",
+                  "    pm.expect(n.sent_at).to.be.a(\"string\");",
+                  "}));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Historial de una alerta",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{seedAlertFrost60}}/notifications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{seedAlertFrost60}}",
+                "notifications"
+              ]
+            },
+            "description": "Snapshot de cada aviso: probabilidad, umbral y emisión del pronóstico que lo disparó."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const items = pm.response.json().items;",
+                  "pm.test(\"Todas son de esta alerta\", () => items.forEach(n => pm.expect(n.alert_id).to.eql(pm.environment.get(\"seedAlertFrost60\"))));",
+                  "pm.test(\"Snapshot completo\", () => items.forEach(n => [\"probability\",\"threshold\",\"issued_at\",\"episode\"].forEach(k => pm.expect(n).to.have.property(k))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bandeja del usuario B no ve lo de A",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userB}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/notifications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications"
+              ]
+            },
+            "description": "Aislamiento entre usuarios."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "const idsA = [pm.environment.get(\"seedAlertFrost60\"), pm.environment.get(\"seedAlertRain50\"), pm.environment.get(\"seedAlertRain80\")];",
+                  "pm.test(\"Ninguna notificación de alertas del usuario A\", () => {",
+                  "    pm.response.json().items.forEach(n => pm.expect(idsA).to.not.include(n.alert_id));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Borrado lógico (y limpieza)",
+      "description": "Borra la alerta creada en la carpeta 1. Deja la base lista para volver a correr la colección.",
+      "item": [
+        {
+          "name": "Borrar alerta",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Borrado lógico."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 204\", () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Borrar otra vez → 204 (idempotente)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Repetir el DELETE no es un error."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 204\", () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "La alerta borrada ya no existe",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}"
+              ]
+            },
+            "description": "Para la API, una alerta borrada es 404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 404\", () => pm.response.to.have.status(404));",
+                  "",
+                  "pm.test(\"Content-Type es application/problem+json (RFC 9457)\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+                  "});",
+                  "pm.test(\"Body problem+json tiene type, title y status\", () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property(\"type\");",
+                  "    pm.expect(b).to.have.property(\"title\");",
+                  "    pm.expect(b.status).to.eql(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ya no aparece en el listado",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts?limit=100",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100"
+                }
+              ]
+            },
+            "description": "No se lista ni se evalúa."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test(\"No figura en el listado\", () => {",
+                  "    pm.expect(pm.response.json().items.map(a => a.id)).to.not.include(pm.collectionVariables.get(\"alertId\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Su historial sigue consultable",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/alerts/{{alertId}}/notifications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "alerts",
+                "{{alertId}}",
+                "notifications"
+              ]
+            },
+            "description": "AC-16: el historial de avisos sobrevive al borrado de la regla."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "",
+                  "pm.test(\"Devuelve una página (puede estar vacía)\", () => pm.expect(pm.response.json()).to.have.property(\"items\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "idemKey",
+      "value": ""
+    },
+    {
+      "key": "alertId",
+      "value": ""
+    },
+    {
+      "key": "etag",
+      "value": ""
+    },
+    {
+      "key": "etagStale",
+      "value": ""
+    },
+    {
+      "key": "cursor",
+      "value": ""
+    },
+    {
+      "key": "firstPageId",
+      "value": ""
+    }
+  ]
+}

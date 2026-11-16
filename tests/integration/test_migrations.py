@@ -5,12 +5,12 @@ import os
 from alembic import command
 from alembic.config import Config
 
+DEFAULT_TEST_DB = "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
+
 
 def test_alembic_migrations_lifecycle() -> None:
     alembic_cfg = Config("alembic.ini")
-    db_url = os.environ.get(
-        "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
-    )
+    db_url = os.environ.get("DATABASE_URL", DEFAULT_TEST_DB)
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
     # 1. upgrade head

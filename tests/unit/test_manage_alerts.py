@@ -402,3 +402,95 @@ async def test_update_alert_status(
         UpdateAlertDTO(alert.id, user_id, status=AlertStatus.PAUSED)
     )
     assert updated.status == AlertStatus.PAUSED
+
+
+async def test_update_alert_not_found(
+    fake_context: tuple[ManageAlerts, FakeAlertRepository, FakeFieldRepository, Clock],
+) -> None:
+    service, _, _, _ = fake_context
+    with pytest.raises(AlertNotFound):
+        await service.update_alert(
+            UpdateAlertDTO(uuid.uuid4(), uuid.uuid4(), status=AlertStatus.PAUSED)
+        )
+
+
+async def test_update_alert_invalid_threshold(
+    fake_context: tuple[ManageAlerts, FakeAlertRepository, FakeFieldRepository, Clock],
+) -> None:
+    service, _, field_repo, _ = fake_context
+    user_id = uuid.uuid4()
+    field_id = uuid.uuid4()
+    field = Field(
+        id=field_id,
+        owner_id=user_id,
+        name="Lote 1",
+        latitude=Decimal("-31.4"),
+        longitude=Decimal("-64.1"),
+        timezone="America/Argentina/Cordoba",
+    )
+    field_repo.fields[field_id] = field
+
+    alert = await service.create_alert(
+        CreateAlertDTO(user_id, field_id, WeatherEvent.FROST, Decimal("60.00"))
+    )
+
+    with pytest.raises(InvalidThreshold):
+        await service.update_alert(UpdateAlertDTO(alert.id, user_id, threshold=Decimal("0.00")))
+
+    with pytest.raises(InvalidThreshold):
+        await service.update_alert(UpdateAlertDTO(alert.id, user_id, threshold=Decimal("101.00")))
+
+
+async def test_update_alert_duplicate_threshold(
+    fake_context: tuple[ManageAlerts, FakeAlertRepository, FakeFieldRepository, Clock],
+) -> None:
+    service, _, field_repo, _ = fake_context
+    user_id = uuid.uuid4()
+    field_id = uuid.uuid4()
+    field = Field(
+        id=field_id,
+        owner_id=user_id,
+        name="Lote 1",
+        latitude=Decimal("-31.4"),
+        longitude=Decimal("-64.1"),
+        timezone="America/Argentina/Cordoba",
+    )
+    field_repo.fields[field_id] = field
+
+    alert1 = await service.create_alert(
+        CreateAlertDTO(user_id, field_id, WeatherEvent.FROST, Decimal("50.00"))
+    )
+    await service.create_alert(
+        CreateAlertDTO(user_id, field_id, WeatherEvent.FROST, Decimal("70.00"))
+    )
+
+    with pytest.raises(DuplicateAlert):
+        await service.update_alert(UpdateAlertDTO(alert1.id, user_id, threshold=Decimal("70.00")))
+
+
+async def test_create_alert_result_properties(
+    fake_context: tuple[ManageAlerts, FakeAlertRepository, FakeFieldRepository, Clock],
+) -> None:
+    service, _, field_repo, _ = fake_context
+    user_id = uuid.uuid4()
+    field_id = uuid.uuid4()
+    field = Field(
+        id=field_id,
+        owner_id=user_id,
+        name="Lote 1",
+        latitude=Decimal("-31.4"),
+        longitude=Decimal("-64.1"),
+        timezone="America/Argentina/Cordoba",
+    )
+    field_repo.fields[field_id] = field
+
+    result = await service.create_alert(
+        CreateAlertDTO(user_id, field_id, WeatherEvent.FROST, Decimal("60.00"))
+    )
+    assert result.event_type == WeatherEvent.FROST
+    assert result.threshold == Decimal("60.00")
+    assert result.status == AlertStatus.ACTIVE
+    assert result.version == 1
+    assert result.deleted_at is None
+    assert result.created_at is not None
+    assert result.updated_at is not None

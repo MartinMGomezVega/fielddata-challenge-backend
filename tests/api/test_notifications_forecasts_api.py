@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
@@ -12,10 +11,8 @@ import httpx
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from agrobot.api.deps import get_current_user_id, get_uow
@@ -31,22 +28,6 @@ from agrobot.infrastructure.db.models import (
     WeatherForecast,
 )
 from agrobot.infrastructure.db.uow import SqlAlchemyUnitOfWork
-
-TEST_DB_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
-)
-
-
-@pytest.fixture
-async def async_engine() -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(TEST_DB_URL, echo=False)
-    yield engine
-    await engine.dispose()
-
-
-@pytest.fixture
-def session_factory(async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(bind=async_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @pytest.fixture

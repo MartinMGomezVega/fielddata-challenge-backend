@@ -25,16 +25,26 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        run: uv sync --frozen --extra dev
 
       - name: Check formatting with ruff
-        run: ruff format --check .
+        run: uv run ruff format --check .
 
       - name: Lint with ruff
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Type check with mypy
-        run: mypy --strict src
+        run: uv run mypy --strict src
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t agrobot:ci .
 
   test:
     name: Tests & Coverage
@@ -44,8 +54,8 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: agrobot
-          POSTGRES_PASSWORD: agrobot_secret
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: agrobot_test
         ports:
           - 5432:5432
@@ -69,14 +79,14 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        run: uv sync --frozen --extra dev
 
       - name: Run Alembic migrations
         env:
-          DATABASE_URL: postgresql+asyncpg://agrobot:agrobot_secret@localhost:5432/agrobot_test
-        run: alembic upgrade head
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test
+        run: uv run alembic upgrade head
 
       - name: Run tests with coverage
         env:
-          DATABASE_URL: postgresql+asyncpg://agrobot:agrobot_secret@localhost:5432/agrobot_test
-        run: pytest --cov=src/agrobot/domain --cov=src/agrobot/application --cov-report=term-missing --cov-fail-under=90
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test
+        run: uv run pytest --cov=src/agrobot/domain --cov=src/agrobot/application --cov-report=term-missing --cov-fail-under=90
