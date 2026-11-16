@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-import os
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 import pytest
-from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy import delete, func, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agrobot.api.deps import get_current_user_id, get_uow
 from agrobot.api.main import create_app
+from agrobot.application.use_cases.evaluate_alerts import EvaluateAlerts
+from agrobot.domain.enums import NotificationStatus, WeatherEvent
+from agrobot.infrastructure.clock import FrozenClock
 from agrobot.infrastructure.db.models import (
     Alert,
     AlertBreachState,
@@ -29,22 +28,6 @@ from agrobot.infrastructure.db.models import (
     WeatherForecast,
 )
 from agrobot.infrastructure.db.uow import SqlAlchemyUnitOfWork
-
-TEST_DB_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
-)
-
-
-@pytest.fixture
-async def async_engine() -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(TEST_DB_URL, echo=False)
-    yield engine
-    await engine.dispose()
-
-
-@pytest.fixture
-def session_factory(async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(bind=async_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @pytest.fixture
@@ -235,6 +218,7 @@ async def test_ac_15_patch_etag_optimistic_locking(
     client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
 ) -> None:
     """AC-15: PATCH con If-Match desactualizado -> 412.
+
     Con ETag correcto -> 200 y versión incrementada.
     """
     headers = {"X-User-Id": str(setup_data["user_id"])}
@@ -271,13 +255,16 @@ async def test_ac_15_patch_etag_optimistic_locking(
     )
     assert r_ok.status_code == 200
     assert r_ok.headers["ETag"] == 'W/"2"'
-    assert r_ok.json()["threshold"] == "75.00" or r_ok.json()["threshold"] == 75.0
+    assert r_ok.json()["threshold"] in ("75.00", 75.0)
 
 
 async def test_ac_16_delete_idempotent(
-    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    setup_data: dict[str, uuid.UUID],
 ) -> None:
     """AC-16: DELETE dos veces -> 204 ambas.
+
     La alerta deja de evaluarse y su historial sigue consultable.
     """
     headers = {"X-User-Id": str(setup_data["user_id"])}
@@ -292,7 +279,28 @@ async def test_ac_16_delete_idempotent(
         },
         headers=headers,
     )
-    alert_id = r_create.json()["id"]
+    alert_id = uuid.UUID(r_create.json()["id"])
+
+    # Sembrar una notificación pasada para esta alerta
+    now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    notif_id = uuid.uuid4()
+    async with session_factory() as session:
+        notif = AlertNotification(
+            id=notif_id,
+            alert_id=alert_id,
+            forecast_date=date(2026, 5, 12),
+            episode=1,
+            event_type=WeatherEvent.HEAT_WAVE,
+            probability=Decimal("85.00"),
+            threshold=Decimal("80.00"),
+            issued_at=now_utc - timedelta(hours=2),
+            status=NotificationStatus.SENT,
+            attempts=1,
+            next_attempt_at=now_utc,
+            sent_at=now_utc - timedelta(hours=1),
+        )
+        session.add(notif)
+        await session.commit()
 
     # 1. Primer borrado -> 204
     r_del1 = await client.delete(f"/api/v1/alerts/{alert_id}", headers=headers)
@@ -306,9 +314,305 @@ async def test_ac_16_delete_idempotent(
     r_get = await client.get(f"/api/v1/alerts/{alert_id}", headers=headers)
     assert r_get.status_code == 404
 
-    # 4. Historial de notificaciones sigue consultable sin error 500
+    # 4. Historial de notificaciones sigue consultable -> 200 con sus items (AC-16)
     r_notifs = await client.get(f"/api/v1/alerts/{alert_id}/notifications", headers=headers)
-    assert r_notifs.status_code in (200, 404)
+    assert r_notifs.status_code == 200
+    data = r_notifs.json()
+    assert len(data["items"]) == 1
+    assert data["items"][0]["id"] == str(notif_id)
+
+    # 5. La bandeja general de notificaciones del usuario también la incluye
+    r_inbox = await client.get("/api/v1/notifications", headers=headers)
+    assert r_inbox.status_code == 200
+    assert any(item["id"] == str(notif_id) for item in r_inbox.json()["items"])
+
+    # 6. El evaluador ya no evalúa la alerta borrada
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    clock = FrozenClock(now_utc)
+    evaluator = EvaluateAlerts(
+        uow=uow,
+        clock=clock,
+        job_lock=None,
+    )
+    report = await evaluator.run()
+    assert report.alerts_evaluated == 0
+    assert report.fired == 0
+
+
+async def test_delete_alert_cancels_pending_notifications(
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    setup_data: dict[str, uuid.UUID],
+) -> None:
+    """Bloque 4 Bug 7: Al borrar una alerta, sus notificaciones pending pasan
+    a failed ('alert_deleted').
+    """
+    headers = {"X-User-Id": str(setup_data["user_id"])}
+
+    # Crear alerta
+    r_create = await client.post(
+        "/api/v1/alerts",
+        json={
+            "field_id": str(setup_data["field_id"]),
+            "event_type": "strong_wind",
+            "threshold": 45.0,
+        },
+        headers=headers,
+    )
+    assert r_create.status_code == 201
+    alert_id = uuid.UUID(r_create.json()["id"])
+
+    # Sembrar notificación en estado PENDING
+    now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    notif_id = uuid.uuid4()
+    async with session_factory() as session:
+        notif = AlertNotification(
+            id=notif_id,
+            alert_id=alert_id,
+            forecast_date=date(2026, 5, 13),
+            episode=1,
+            event_type=WeatherEvent.STRONG_WIND,
+            probability=Decimal("50.00"),
+            threshold=Decimal("45.00"),
+            issued_at=now_utc - timedelta(hours=1),
+            status=NotificationStatus.PENDING,
+            attempts=0,
+            next_attempt_at=now_utc,
+        )
+        session.add(notif)
+        await session.commit()
+
+    # Borrar la alerta
+    r_del = await client.delete(f"/api/v1/alerts/{alert_id}", headers=headers)
+    assert r_del.status_code == 204
+
+    # Verificar que en la base la notificación pasó a FAILED con last_error = 'alert_deleted'
+    async with session_factory() as session:
+        updated_notif = await session.get(AlertNotification, notif_id)
+        assert updated_notif is not None
+        assert updated_notif.status == NotificationStatus.FAILED
+        assert updated_notif.last_error == "alert_deleted"
+
+
+async def test_list_alerts_filter_by_status(
+    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+) -> None:
+    """Bloque 4 Bug 3: GET /api/v1/alerts?status=paused filtra correctamente."""
+    headers = {"X-User-Id": str(setup_data["user_id"])}
+
+    # Crear alerta 1 y pausarla
+    r1 = await client.post(
+        "/api/v1/alerts",
+        json={
+            "field_id": str(setup_data["field_id"]),
+            "event_type": "frost",
+            "threshold": 30.0,
+        },
+        headers=headers,
+    )
+    assert r1.status_code == 201
+    id1 = r1.json()["id"]
+    etag1 = r1.headers["ETag"]
+
+    r_patch = await client.patch(
+        f"/api/v1/alerts/{id1}",
+        json={"status": "paused"},
+        headers={**headers, "If-Match": etag1},
+    )
+    assert r_patch.status_code == 200
+
+    # Crear alerta 2 (activa)
+    r2 = await client.post(
+        "/api/v1/alerts",
+        json={
+            "field_id": str(setup_data["field_id"]),
+            "event_type": "rain",
+            "threshold": 40.0,
+        },
+        headers=headers,
+    )
+    assert r2.status_code == 201
+    id2 = r2.json()["id"]
+
+    # Filtrar por status=paused
+    r_paused = await client.get("/api/v1/alerts?status=paused", headers=headers)
+    assert r_paused.status_code == 200
+    paused_ids = [a["id"] for a in r_paused.json()["items"]]
+    assert id1 in paused_ids
+    assert id2 not in paused_ids
+
+    # Filtrar por status=active
+    r_active = await client.get("/api/v1/alerts?status=active", headers=headers)
+    assert r_active.status_code == 200
+    active_ids = [a["id"] for a in r_active.json()["items"]]
+    assert id2 in active_ids
+    assert id1 not in active_ids
+
+
+async def test_list_alerts_limit_and_cursor_validation(
+    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+) -> None:
+    """Bloque 4 Bug 4: limit inválido (0, -1, 101) o cursor inválido devuelven 422 RFC 9457."""
+    headers = {"X-User-Id": str(setup_data["user_id"])}
+
+    for invalid_limit in (0, -5, 101):
+        r = await client.get(f"/api/v1/alerts?limit={invalid_limit}", headers=headers)
+        assert r.status_code == 422
+        assert r.headers["content-type"] == "application/problem+json"
+
+        r_notif = await client.get(f"/api/v1/notifications?limit={invalid_limit}", headers=headers)
+        assert r_notif.status_code == 422
+        assert r_notif.headers["content-type"] == "application/problem+json"
+
+    # Cursor inválido
+    r_cursor = await client.get("/api/v1/alerts?cursor=invalid_base64_garbage", headers=headers)
+    assert r_cursor.status_code == 422
+    assert r_cursor.headers["content-type"] == "application/problem+json"
+
+
+async def test_concurrent_posts_and_idempotency_race(
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    setup_data: dict[str, uuid.UUID],
+) -> None:
+    """Bloque 4 Bug 5: Concurrencia en POST /alerts.
+
+    - Dos POST idénticos simultáneos: uno 201, el otro 409 (DuplicateAlert).
+    - Dos POST simultáneos con misma Idempotency-Key: ambos 201 con mismo id y una sola fila en DB.
+    - Reuso de Idempotency-Key vencida: genera 201 nuevo.
+    """
+    headers = {"X-User-Id": str(setup_data["user_id"])}
+
+    # 1. Dos POST idénticos sin key simultáneos -> uno 201, otro 409
+    body_dup = {
+        "field_id": str(setup_data["field_id"]),
+        "event_type": "hail",
+        "threshold": 65.0,
+    }
+    r_a, r_b = await asyncio.gather(
+        client.post("/api/v1/alerts", json=body_dup, headers=headers),
+        client.post("/api/v1/alerts", json=body_dup, headers=headers),
+    )
+    statuses = {r_a.status_code, r_b.status_code}
+    assert statuses == {201, 409}
+
+    # 2. Dos POST simultáneos con la MISMA Idempotency-Key
+    idem_key = f"race-key-{uuid.uuid4()}"
+    headers_idem = {**headers, "Idempotency-Key": idem_key}
+    body_idem = {
+        "field_id": str(setup_data["field_id"]),
+        "event_type": "heat_wave",
+        "threshold": 38.0,
+    }
+    r_id1, r_id2 = await asyncio.gather(
+        client.post("/api/v1/alerts", json=body_idem, headers=headers_idem),
+        client.post("/api/v1/alerts", json=body_idem, headers=headers_idem),
+    )
+    assert r_id1.status_code == 201
+    assert r_id2.status_code == 201
+    assert r_id1.json()["id"] == r_id2.json()["id"]
+
+    # Verificar que solo hay 1 alerta en la base para heat_wave
+    async with session_factory() as session:
+        alerts = (
+            await session.execute(
+                delete(Alert).where(
+                    Alert.event_type == WeatherEvent.HEAT_WAVE,
+                    Alert.threshold == Decimal("38.00"),
+                )
+            )
+        ).rowcount
+        assert alerts == 1
+
+    # 3. Reuso de Idempotency-Key vencida -> 201 nuevo reemplazando la clave
+    expired_key = f"expired-key-{uuid.uuid4()}"
+    headers_exp = {**headers, "Idempotency-Key": expired_key}
+    body_exp1 = {
+        "field_id": str(setup_data["field_id"]),
+        "event_type": "strong_wind",
+        "threshold": 55.0,
+    }
+    r_exp1 = await client.post("/api/v1/alerts", json=body_exp1, headers=headers_exp)
+    assert r_exp1.status_code == 201
+
+    # Forzar expiración de la clave en la base
+    async with session_factory() as session:
+        await session.execute(
+            update(IdempotencyKey)
+            .where(IdempotencyKey.key == expired_key)
+            .values(expires_at=func.now() - timedelta(hours=1))
+        )
+        await session.commit()
+
+    # Reutilizar la clave vencida para una nueva alerta
+    body_exp2 = {
+        "field_id": str(setup_data["field_id"]),
+        "event_type": "frost",
+        "threshold": 92.0,
+    }
+    r_exp2 = await client.post("/api/v1/alerts", json=body_exp2, headers=headers_exp)
+    assert r_exp2.status_code == 201
+    assert r_exp2.json()["id"] != r_exp1.json()["id"]
+
+
+async def test_patch_malformed_if_match_returns_412(
+    client: httpx.AsyncClient, setup_data: dict[str, uuid.UUID]
+) -> None:
+    """Bloque 4 Bug 5: If-Match malformado devuelve 412 Precondition Failed, no se ignora."""
+    headers = {"X-User-Id": str(setup_data["user_id"])}
+
+    r_create = await client.post(
+        "/api/v1/alerts",
+        json={
+            "field_id": str(setup_data["field_id"]),
+            "event_type": "rain",
+            "threshold": 77.0,
+        },
+        headers=headers,
+    )
+    assert r_create.status_code == 201
+    alert_id = r_create.json()["id"]
+
+    for bad_etag in ("not-an-etag", 'W/"xyz"', '""', "123"):
+        r_bad = await client.patch(
+            f"/api/v1/alerts/{alert_id}",
+            json={"threshold": 78.0},
+            headers={**headers, "If-Match": bad_etag},
+        )
+        assert r_bad.status_code == 412
+        assert r_bad.headers["content-type"] == "application/problem+json"
+
+
+async def test_rfc9457_error_responses(
+    session_factory: async_sessionmaker[AsyncSession], setup_data: dict[str, uuid.UUID]
+) -> None:
+    """Bloque 4 Bug 11: X-User-Id ausente o inválido, y 404/500 devuelven
+    application/problem+json.
+    """
+    app = create_app()
+    app.dependency_overrides[get_uow] = lambda: SqlAlchemyUnitOfWork(session_factory)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as unauth_client:
+        # 1. Header X-User-Id ausente -> 422 problem+json
+        r_missing_auth = await unauth_client.get("/api/v1/alerts")
+        assert r_missing_auth.status_code == 422
+        assert r_missing_auth.headers["content-type"] == "application/problem+json"
+        assert r_missing_auth.json()["title"] == "Validation Error"
+
+        # 2. Header X-User-Id con formato inválido -> 422 problem+json
+        r_bad_auth = await unauth_client.get("/api/v1/alerts", headers={"X-User-Id": "not-a-uuid"})
+        assert r_bad_auth.status_code == 422
+        assert r_bad_auth.headers["content-type"] == "application/problem+json"
+        assert "Formato de X-User-Id inválido" in r_bad_auth.json()["detail"]
+
+        # 3. Endpoint inexistente -> 404 problem+json
+        r_404 = await unauth_client.get(
+            "/api/v1/nonexistent", headers={"X-User-Id": str(setup_data["user_id"])}
+        )
+        assert r_404.status_code == 404
+        assert r_404.headers["content-type"] == "application/problem+json"
+        assert r_404.json()["title"] == "Not Found"
 
 
 async def test_health_endpoints(client: httpx.AsyncClient) -> None:

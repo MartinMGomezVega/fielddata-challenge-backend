@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     dispatch_concurrency: int = Field(
         default=10, description="Concurrencia máxima para envío simultáneo de notificaciones"
     )
+    shutdown_timeout_s: float = Field(
+        default=30.0,
+        description="Segundos máximos para esperar tareas en vuelo durante shutdown ordenado",
+    )
 
     # API
     host: str = "0.0.0.0"

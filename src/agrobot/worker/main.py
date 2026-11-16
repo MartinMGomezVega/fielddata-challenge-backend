@@ -16,7 +16,7 @@ from agrobot.infrastructure.db.session import dispose_engine, get_engine, get_se
 from agrobot.infrastructure.db.uow import SqlAlchemyUnitOfWork
 from agrobot.infrastructure.notifications.logging_sender import LoggingSender
 from agrobot.logging import configure_logging, get_logger
-from agrobot.worker.scheduler import create_scheduler
+from agrobot.worker.scheduler import create_scheduler, graceful_shutdown
 
 logger = get_logger("worker.main")
 
@@ -40,14 +40,16 @@ async def main() -> None:
         return SqlAlchemyUnitOfWork(session_factory)
 
     def job_lock_factory() -> PostgresAdvisoryLock:
-        session = session_factory()
-        return PostgresAdvisoryLock(session)
+        return PostgresAdvisoryLock(session_factory)
+
+    inflight_tasks: set[asyncio.Task[None]] = set()
 
     scheduler = create_scheduler(
         uow_factory=uow_factory,
         clock=clock,
         sender=sender,
         job_lock_factory=job_lock_factory,
+        inflight_tasks=inflight_tasks,
     )
 
     shutdown_event = asyncio.Event()
@@ -63,8 +65,11 @@ async def main() -> None:
         await shutdown_event.wait()
         logger.info("worker_shutdown_signal_received")
     finally:
-        logger.info("worker_shutting_down_scheduler")
-        scheduler.shutdown(wait=True)
+        await graceful_shutdown(
+            scheduler=scheduler,
+            inflight_tasks=inflight_tasks,
+            timeout_s=settings.shutdown_timeout_s,
+        )
         logger.info("worker_disposing_db_engine")
         await dispose_engine()
         logger.info("worker_shutdown_complete")

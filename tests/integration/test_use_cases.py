@@ -13,7 +13,6 @@ Cubre:
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
@@ -22,10 +21,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from agrobot.application.use_cases.dispatch_notifications import DispatchNotifications
@@ -43,22 +40,6 @@ from agrobot.infrastructure.db.models import (
 )
 from agrobot.infrastructure.db.uow import SqlAlchemyUnitOfWork
 from agrobot.infrastructure.notifications.logging_sender import LoggingSender
-
-TEST_DB_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/agrobot_test"
-)
-
-
-@pytest.fixture
-async def async_engine() -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(TEST_DB_URL, echo=False)
-    yield engine
-    await engine.dispose()
-
-
-@pytest.fixture
-def session_factory(async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(bind=async_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @pytest.fixture
@@ -295,6 +276,36 @@ async def test_ac_04d_upsert_with_older_issued_at_is_ignored(
         assert stored.issued_at == f1.issued_at
 
 
+async def test_ac_04c_stale_skipped_in_evaluator_run(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
+    """AC-04c: Pronósticos stale (>24h) se omiten en EvaluateAlerts y no disparan."""
+    entities = seeded_entities
+    now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    clock = FrozenClock(now_utc)
+    target_date = date(2026, 5, 11)
+    uow = SqlAlchemyUnitOfWork(session_factory)
+
+    async with uow as u:
+        await u.forecasts.upsert(
+            WeatherForecast(
+                field_id=entities["field_id"],
+                forecast_date=target_date,
+                event_type=WeatherEvent.FROST,
+                probability=Decimal("90.00"),
+                issued_at=now_utc - timedelta(hours=26),
+            )
+        )
+        await u.commit()
+
+    async with session_factory() as session:
+        lock = PostgresAdvisoryLock(session)
+        evaluator = EvaluateAlerts(uow, clock, lock)
+        report = await evaluator.run()
+        assert report.stale >= 1
+        assert report.fired == 0
+
+
 async def test_ac_11_concurrent_evaluators_advisory_lock(
     session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
 ) -> None:
@@ -500,3 +511,230 @@ async def test_concurrent_dispatchers_never_duplicate(
     # La suma de claimed debe ser exactamente 10 (sin solapamiento)
     assert r1.claimed + r2.claimed == 10
     assert r1.sent + r2.sent == 10
+
+
+async def test_dispatcher_missing_recipient_phone_fails_without_calling_sender(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
+    """Bloque 4 Bug 8: Si no hay teléfono destinatario, marcar failed
+    ('missing_recipient') sin llamar al sender.
+    """
+    entities = seeded_entities
+    now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    clock = FrozenClock(now_utc)
+    target_date = date(2026, 5, 11)
+
+    # Configurar usuario sin teléfono (cadena vacía)
+    async with session_factory() as session:
+        user = await session.get(User, entities["user_id"])
+        assert user is not None
+        user.phone_number = ""
+        await session.commit()
+
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    notif_id = uuid.uuid4()
+    async with uow as u:
+        await u.notifications.create_if_not_exists(
+            AlertNotification(
+                id=notif_id,
+                alert_id=entities["alert_id"],
+                forecast_date=target_date,
+                episode=1,
+                event_type=WeatherEvent.FROST,
+                probability=Decimal("70.00"),
+                threshold=Decimal("60.00"),
+                issued_at=now_utc - timedelta(hours=1),
+                status=NotificationStatus.PENDING,
+                attempts=0,
+                next_attempt_at=now_utc,
+            )
+        )
+        await u.commit()
+
+    sender = LoggingSender()
+    dispatcher = DispatchNotifications(uow, sender, clock, max_attempts=3)
+    report = await dispatcher.run()
+
+    assert report.failed == 1
+    assert report.sent == 0
+    assert len(sender._attempt_counts) == 0
+
+    async with session_factory() as session:
+        notif = await session.get(AlertNotification, notif_id)
+        assert notif is not None
+        assert notif.status == NotificationStatus.FAILED
+        assert notif.last_error == "missing_recipient"
+
+
+async def test_dispatcher_backoff_respects_clock(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
+    """Bloque 4 Bug 9: Notificación en backoff NO se reclama antes de
+    next_attempt_at y SÍ después.
+    """
+    entities = seeded_entities
+    now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    clock = FrozenClock(now_utc)
+    target_date = date(2026, 5, 11)
+
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    notif_id = uuid.uuid4()
+    # Programar notificación para 10 minutos en el futuro
+    future_time = now_utc + timedelta(minutes=10)
+    async with uow as u:
+        await u.notifications.create_if_not_exists(
+            AlertNotification(
+                id=notif_id,
+                alert_id=entities["alert_id"],
+                forecast_date=target_date,
+                episode=1,
+                event_type=WeatherEvent.FROST,
+                probability=Decimal("70.00"),
+                threshold=Decimal("60.00"),
+                issued_at=now_utc - timedelta(hours=1),
+                status=NotificationStatus.PENDING,
+                attempts=1,
+                next_attempt_at=future_time,
+            )
+        )
+        await u.commit()
+
+    sender = LoggingSender()
+    dispatcher = DispatchNotifications(uow, sender, clock, max_attempts=3)
+
+    # 1. Antes de next_attempt_at -> NO se reclama
+    r1 = await dispatcher.run()
+    assert r1.claimed == 0
+    assert r1.sent == 0
+
+    # 2. Adelantar el reloj a 11 minutos después -> SÍ se reclama y se envía
+    clock.set_time(now_utc + timedelta(minutes=11))
+    r2 = await dispatcher.run()
+    assert r2.claimed == 1
+    assert r2.sent == 1
+
+
+async def test_evaluator_unnecessary_writes_zero_rows_on_low_forecast(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
+    """Bloque 4 Bug 10: 2 corridas con pronóstico bajo producen 0 filas en alert_breach_states."""
+    entities = seeded_entities
+    now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    clock = FrozenClock(now_utc)
+    target_date = date(2026, 5, 12)
+
+    uow = SqlAlchemyUnitOfWork(session_factory)
+
+    # Pronóstico con probabilidad 30% (muy por debajo del umbral de 60%)
+    async with uow as u:
+        await u.forecasts.upsert(
+            WeatherForecast(
+                field_id=entities["field_id"],
+                forecast_date=target_date,
+                event_type=WeatherEvent.FROST,
+                probability=Decimal("30.00"),
+                issued_at=now_utc - timedelta(hours=1),
+            )
+        )
+        await u.commit()
+
+    evaluator = EvaluateAlerts(
+        uow=uow,
+        clock=clock,
+        job_lock=None,
+    )
+
+    # Corrida 1
+    r1 = await evaluator.run()
+    assert r1.fired == 0
+
+    # Corrida 2
+    r2 = await evaluator.run()
+    assert r2.fired == 0
+
+    # Verificar que alert_breach_states tiene 0 filas
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count(AlertBreachState.alert_id)).where(
+                AlertBreachState.alert_id == entities["alert_id"]
+            )
+        )
+        assert count == 0
+
+
+async def test_ac_05_multiple_rules_same_field_fire_independently(
+    session_factory: async_sessionmaker[AsyncSession], seeded_entities: dict[str, uuid.UUID]
+) -> None:
+    """AC-05: Reglas rain >= 50 y rain >= 80 sobre el mismo campo.
+    Pronóstico 85 -> 2 notificaciones independientes.
+    """
+    entities = seeded_entities
+    now_utc = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    clock = FrozenClock(now_utc)
+    target_date = date(2026, 5, 12)
+
+    alert_id_50 = uuid.uuid4()
+    alert_id_80 = uuid.uuid4()
+
+    async with session_factory() as session:
+        a50 = Alert(
+            id=alert_id_50,
+            user_id=entities["user_id"],
+            field_id=entities["field_id"],
+            event_type=WeatherEvent.RAIN,
+            threshold=Decimal("50.00"),
+            status=AlertStatus.ACTIVE,
+            version=1,
+            created_at=now_utc,
+            updated_at=now_utc,
+        )
+        a80 = Alert(
+            id=alert_id_80,
+            user_id=entities["user_id"],
+            field_id=entities["field_id"],
+            event_type=WeatherEvent.RAIN,
+            threshold=Decimal("80.00"),
+            status=AlertStatus.ACTIVE,
+            version=1,
+            created_at=now_utc,
+            updated_at=now_utc,
+        )
+        forecast_85 = WeatherForecast(
+            field_id=entities["field_id"],
+            forecast_date=target_date,
+            event_type=WeatherEvent.RAIN,
+            probability=Decimal("85.00"),
+            issued_at=now_utc - timedelta(hours=1),
+            ingested_at=now_utc,
+        )
+        session.add_all([a50, a80, forecast_85])
+        await session.commit()
+
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    evaluator = EvaluateAlerts(
+        uow=uow,
+        clock=clock,
+        job_lock=None,
+    )
+    report = await evaluator.run()
+
+    # Ambas reglas deben disparar
+    assert report.fired >= 2
+
+    # Verificar que ambas notificaciones existen en alert_notifications
+    async with session_factory() as session:
+        notifs = (
+            (
+                await session.execute(
+                    select(AlertNotification).where(
+                        AlertNotification.alert_id.in_([alert_id_50, alert_id_80]),
+                        AlertNotification.forecast_date == target_date,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(notifs) == 2
+        thresholds = {n.threshold for n in notifs}
+        assert thresholds == {Decimal("50.00"), Decimal("80.00")}

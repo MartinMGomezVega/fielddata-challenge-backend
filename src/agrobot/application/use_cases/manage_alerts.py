@@ -95,6 +95,26 @@ class UpdateAlertDTO:
     if_match: str | None = None
 
 
+def _make_cached_result(existing: IdempotencyRecord, user_id: uuid.UUID) -> CreateAlertResult:
+    cached_body_dict = json.loads(existing.response_body)
+    cached_alert = Alert(
+        id=uuid.UUID(cached_body_dict["id"]),
+        field_id=uuid.UUID(cached_body_dict["field_id"]),
+        user_id=user_id,
+        event_type=WeatherEvent(cached_body_dict["event_type"]),
+        threshold=Decimal(str(cached_body_dict["threshold"])),
+        status=AlertStatus(cached_body_dict["status"]),
+        version=1,
+    )
+    return CreateAlertResult(
+        alert=cached_alert,
+        is_cached=True,
+        cached_status_code=existing.response_code,
+        cached_headers=json.loads(existing.response_headers),
+        cached_body=cached_body_dict,
+    )
+
+
 class ManageAlerts:
     """Servicio de aplicación para operaciones sobre alertas."""
 
@@ -127,23 +147,7 @@ class ManageAlerts:
                         raise IdempotencyConflict(
                             "Misma Idempotency-Key pero con un payload diferente (422)"
                         )
-                    cached_body_dict = json.loads(existing.response_body)
-                    cached_alert = Alert(
-                        id=uuid.UUID(cached_body_dict["id"]),
-                        field_id=uuid.UUID(cached_body_dict["field_id"]),
-                        user_id=dto.user_id,
-                        event_type=WeatherEvent(cached_body_dict["event_type"]),
-                        threshold=Decimal(str(cached_body_dict["threshold"])),
-                        status=AlertStatus(cached_body_dict["status"]),
-                        version=1,
-                    )
-                    return CreateAlertResult(
-                        alert=cached_alert,
-                        is_cached=True,
-                        cached_status_code=existing.response_code,
-                        cached_headers=json.loads(existing.response_headers),
-                        cached_body=cached_body_dict,
-                    )
+                    return _make_cached_result(existing, dto.user_id)
 
             # 2. Validación de campo y pertenencia
             field = await uow.fields.get_by_id(dto.field_id, user_id=dto.user_id)
@@ -157,6 +161,14 @@ class ManageAlerts:
                 threshold=dto.threshold,
             )
             if is_duplicate:
+                if dto.idempotency_key and dto.payload_hash:
+                    existing = await uow.idempotency.get(dto.user_id, dto.idempotency_key)
+                    if existing is not None and existing.expires_at > now:
+                        if existing.request_hash != dto.payload_hash:
+                            raise IdempotencyConflict(
+                                "Misma Idempotency-Key pero con un payload diferente (422)"
+                            )
+                        return _make_cached_result(existing, dto.user_id)
                 raise DuplicateAlert(
                     f"Ya existe una alerta activa para el campo {dto.field_id}, "
                     f"evento {dto.event_type} y umbral {dto.threshold}"
@@ -174,7 +186,19 @@ class ManageAlerts:
                 updated_at=now,
                 version=1,
             )
-            created = await uow.alerts.create(alert)
+            try:
+                created = await uow.alerts.create(alert)
+            except DuplicateAlert as err:
+                if dto.idempotency_key and dto.payload_hash:
+                    await uow.rollback()
+                    existing = await uow.idempotency.get(dto.user_id, dto.idempotency_key)
+                    if existing is not None and existing.expires_at > now:
+                        if existing.request_hash != dto.payload_hash:
+                            raise IdempotencyConflict(
+                                "Misma Idempotency-Key pero con un payload diferente (422)"
+                            ) from err
+                        return _make_cached_result(existing, dto.user_id)
+                raise
 
             # 5. Guardar clave de idempotencia en la MISMA transacción
             if dto.idempotency_key and dto.payload_hash and dto.response_data_factory:
@@ -202,13 +226,7 @@ class ManageAlerts:
                             raise IdempotencyConflict(
                                 "Misma Idempotency-Key pero con un payload diferente (422)"
                             ) from err
-                        return CreateAlertResult(
-                            alert=created,
-                            is_cached=True,
-                            cached_status_code=existing.response_code,
-                            cached_headers=json.loads(existing.response_headers),
-                            cached_body=json.loads(existing.response_body),
-                        )
+                        return _make_cached_result(existing, dto.user_id)
                     raise
 
             await uow.commit()

@@ -1,10 +1,24 @@
 """Test de contrato OpenAPI: compara app.openapi() contra docs/openapi.yaml."""
 
-from pathlib import Path
+from __future__ import annotations
 
-import yaml  # type: ignore[import-untyped]
+from pathlib import Path
+from typing import Any
+
+import yaml
 
 from agrobot.api.main import create_app
+
+
+def _resolve_param(spec_schema: dict[str, Any], param_dict: dict[str, Any]) -> dict[str, Any]:
+    """Resuelve referencias $ref para parámetros del esquema OpenAPI."""
+    if "$ref" in param_dict:
+        parts = param_dict["$ref"].split("/")[1:]
+        resolved: Any = spec_schema
+        for part in parts:
+            resolved = resolved[part]
+        return resolved  # type: ignore[no-any-return]
+    return param_dict
 
 
 def test_openapi_contract_matches_spec() -> None:
@@ -20,6 +34,8 @@ def test_openapi_contract_matches_spec() -> None:
     # 1. Validar que todos los paths de la especificación existan en la app
     for path, path_item in spec_schema["paths"].items():
         assert path in app_schema["paths"], f"Falta el path {path} en la API generada"
+
+        path_level_params = path_item.get("parameters", [])
 
         for method, operation in path_item.items():
             if method in ("parameters", "$ref"):
@@ -37,11 +53,25 @@ def test_openapi_contract_matches_spec() -> None:
                     f"Falta el código de respuesta {status_code} en {method.upper()} {path}"
                 )
 
-    # 3. Validar componentes de esquemas clave
+            # 3. Validar que todos los parámetros esperados (query, header, path) existan
+            op_params = path_level_params + operation.get("parameters", [])
+            expected_params: list[tuple[str, str]] = []
+            for raw_p in op_params:
+                resolved = _resolve_param(spec_schema, raw_p)
+                expected_params.append((resolved["name"], resolved["in"]))
+
+            actual_params = [(p["name"], p["in"]) for p in app_operation.get("parameters", [])]
+
+            for exp_name, exp_in in expected_params:
+                assert (exp_name, exp_in) in actual_params, (
+                    f"Falta el parámetro '{exp_name}' (in: {exp_in}) en {method.upper()} {path}. "
+                    f"Parámetros encontrados: {actual_params}"
+                )
+
+    # 4. Validar componentes de esquemas clave
     for schema_name, schema_spec in spec_schema.get("components", {}).get("schemas", {}).items():
         if "properties" in schema_spec and "required" in schema_spec:
             app_schemas = app_schema.get("components", {}).get("schemas", {})
-            # Si el schema existe en la app, verificar que contenga los campos requeridos
             matching_key = None
             for k in app_schemas:
                 if (

@@ -78,22 +78,23 @@ class EvaluateAlerts:
         start_time = time.monotonic()
 
         # 1. Intentar adquirir lock de exclusión mutua para réplicas concurrentes
-        acquired = await self._lock.try_acquire(EVALUATE_ALERTS_LOCK_ID)
-        if not acquired:
-            logger.info("evaluate_alerts_skipped_concurrent_execution", run_id=run_id)
-            return RunReport(
-                run_id=run_id,
-                alerts_evaluated=0,
-                fired=0,
-                held=0,
-                rearmed=0,
-                stale=0,
-                out_of_window=0,
-                duplicated=0,
-                duration_seconds=0.0,
-                skipped=True,
-                reason="Advisory lock busy (another replica running)",
-            )
+        if self._lock is not None:
+            acquired = await self._lock.try_acquire(EVALUATE_ALERTS_LOCK_ID)
+            if not acquired:
+                logger.info("evaluate_alerts_skipped_concurrent_execution", run_id=run_id)
+                return RunReport(
+                    run_id=run_id,
+                    alerts_evaluated=0,
+                    fired=0,
+                    held=0,
+                    rearmed=0,
+                    stale=0,
+                    out_of_window=0,
+                    duplicated=0,
+                    duration_seconds=0.0,
+                    skipped=True,
+                    reason="Advisory lock busy (another replica running)",
+                )
 
         logger.info("evaluate_alerts_started", run_id=run_id)
         alerts_evaluated = 0
@@ -259,7 +260,8 @@ class EvaluateAlerts:
                     await uow.commit()
 
         finally:
-            await self._lock.release(EVALUATE_ALERTS_LOCK_ID)
+            if self._lock is not None:
+                await self._lock.release(EVALUATE_ALERTS_LOCK_ID)
 
         duration = round(time.monotonic() - start_time, 3)
         report = RunReport(
